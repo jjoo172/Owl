@@ -193,11 +193,14 @@ async function scan(target) {
           'restarted mid-scan (for example, it ran out of memory on a large repository). Try again, or try a smaller repository.',
       );
     }
-    setStep(2, current.tier === 'full' ? 'pass' : 'warn',
-      `${current.tier === 'full' ? 'Full review' : 'Basic scan'} · ${(current.durationMs / 1000).toFixed(1)}s${current.cached ? ' (cached)' : ''}`);
+    const part = current.coverage && !current.coverage.complete;
+    setStep(2, current.tier === 'full' && !part ? 'pass' : 'warn',
+      `${current.tier === 'full' ? (part ? 'Partial review' : 'Full review') : part ? 'Basic, partial scan' : 'Basic scan'} · ${(current.durationMs / 1000).toFixed(1)}s${current.cached ? ' (cached)' : ''}`);
     setStep1Open(false); // the checks passed; keep them one click away
     $('#step2-text').textContent = current.tier === 'full'
-      ? `Claude reviewed ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`
+      ? part
+        ? `Claude reviewed ${fmt(current.coverage.reviewedFiles)} of ${fmt(current.coverage.totalFiles)} source files (about ${current.coverage.percent}% of the code) at commit ${target.sha.slice(0, 10)} — a partial scan.`
+        : `Claude reviewed all of ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`
       : `Claude was unavailable (${current.tierReason}), so this is a basic pattern scan.`;
   } catch (err) {
     setStep(2, 'fail', 'Failed');
@@ -220,6 +223,8 @@ function locFromString(data, s) {
 function render(data) {
   const { repo, stats, risk, ai } = data;
   const full = data.tier === 'full';
+  const cov = data.coverage || { complete: true, notReviewed: [], reasons: [] };
+  const partial = !cov.complete;
   const headline = ['Low', 'Moderate', 'High', 'Critical'].includes(risk.level) ? risk.level : 'Moderate';
   const meterPct = full ? { Low: 20, Moderate: 45, High: 70, Critical: 95 }[headline] : Math.max(4, risk.score);
   const sevTotal = SEVERITIES.reduce((s, k) => s + (stats.bySeverity[k] || 0), 0) || 1;
@@ -231,9 +236,14 @@ function render(data) {
       <b>Basic scan — lower tier.</b> ${esc(data.tierReason || 'Claude was unavailable')}, so these results come from pattern matching alone.
       It misses most lifetime, aliasing and concurrency bugs (dangling references, use-after-free, data races), so treat the rating as a lower bound and re-run later for a full review.
     </section>`}
+    ${partial ? `<section class="tier-banner partial-banner" role="status">
+      <b>Partial scan — about ${cov.percent}% of the code was reviewed.</b> ${cov.reasons.map((r) => esc(r)).join('. ')}.
+      The rating and findings below cover only the reviewed files, so problems elsewhere would not show up here.
+      ${cov.notReviewed.length ? `<button type="button" class="link" id="show-not-reviewed">See the ${fmt(cov.notReviewed.length)} file${cov.notReviewed.length === 1 ? '' : 's'} not reviewed</button>` : ''}
+    </section>` : ''}
     <section class="card hero">
       <div class="verdict">
-        <div class="label">Overall risk${full ? '' : ' (basic scan)'}</div>
+        <div class="label">Overall risk${[!full && 'basic', partial && 'partial'].filter(Boolean).length ? ` (${[!full && 'basic', partial && 'partial'].filter(Boolean).join(', ')} scan)` : ''}</div>
         <div class="level lvl-${esc(headline)}">${esc(headline)}</div>
         <div class="meter"><div class="bg-${esc(headline)}" style="width:${meterPct}%"></div></div>
         <div class="sub" style="margin-top:6px">${full ? `Assessed by ${esc(modelName(ai.model))}` : `Pattern score ${risk.score}/100 — a lower bound`}</div>
@@ -242,12 +252,15 @@ function render(data) {
         <div class="repo-line">${repo.url ? `<a href="${esc(repo.url)}" target="_blank" rel="noopener">${esc(repo.owner)}/${esc(repo.name)}</a>` : esc(repo.name)}
           ${repo.ref ? `<span class="pill">${esc(repo.ref)}</span>` : ''}
           ${repo.sha ? `<span class="pill mono">${esc(repo.sha.slice(0, 10))}</span>` : ''}
-          ${full ? '<span class="pill claude">Full review</span>' : '<span class="pill warn">Basic scan</span>'}
+          ${full ? `<span class="pill claude">${partial ? 'Claude review' : 'Full review'}</span>` : '<span class="pill warn">Basic scan</span>'}
+          ${partial ? `<span class="pill warn">Partial scan · ${cov.percent}% reviewed</span>` : ''}
           ${data.cached ? '<span class="pill">cached</span>' : ''}
         </div>
         <div class="stats">
           <div class="stat"><b>${fmt(stats.totalFindings)}</b><span>${full ? 'vulnerabilities found' : 'pattern hits'}</span></div>
-          <div class="stat"><b>${fmt(stats.sourceFiles)}</b><span>C/C++ source files</span></div>
+          ${partial
+            ? `<div class="stat stat-warn"><b>${fmt(cov.reviewedFiles)} of ${fmt(cov.totalFiles)}</b><span>source files reviewed (${cov.percent}% of the code)</span></div>`
+            : `<div class="stat"><b>${fmt(stats.sourceFiles)}</b><span>C/C++ source files${full ? ', all reviewed' : ''}</span></div>`}
           <div class="stat"><b>${fmt(stats.loc)}</b><span>lines of code</span></div>
           <div class="stat"><b>${fmt(data.archive.ignoredNonSourceFiles)}</b><span>non-source files ignored</span></div>
         </div>
@@ -297,6 +310,8 @@ function render(data) {
             <td class="num">${fmt(h.findings)}</td></tr>`).join('')}</tbody>
         </table></div>` : `<p class="sub">No ${noun}${plural(0)} found.</p>`)}
 
+    ${cov.notReviewed.length ? fold('notreviewed-card', 'Not reviewed', `${fmt(cov.notReviewed.length)} file${cov.notReviewed.length === 1 ? '' : 's'}`, renderNotReviewed(data, cov)) : ''}
+
     ${full ? '' : fold('signals-card', 'Safer-idiom signals', `${fmt(Object.keys(data.mitigations || {}).length)} found`, renderMitigations(data, false))}
 
     <section class="actions">
@@ -307,6 +322,10 @@ function render(data) {
 
   resultsEl.hidden = false;
   wireFindings(data);
+  $('#show-not-reviewed')?.addEventListener('click', () => {
+    $('#notreviewed-card').open = true;
+    $('#notreviewed-card').scrollIntoView({ behavior: 'smooth' });
+  });
   $('#dl-json').onclick = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `owl-${repo.owner}-${repo.name}.json` });
@@ -369,6 +388,20 @@ function renderSummary(data) {
     <div class="ai-summary">${paras}</div>
     <p class="sub">${cov} · ${esc(modelName(ai.model))}${cost}. Open the sections below for details.</p>
   </section>`;
+}
+
+function renderNotReviewed(data, cov) {
+  const LIMIT = 500;
+  const byWhy = new Map();
+  for (const f of cov.notReviewed) {
+    if (!byWhy.has(f.why)) byWhy.set(f.why, []);
+    byWhy.get(f.why).push(f.path);
+  }
+  const link = (p) => (data.repo.blobBase ? `<a href="${esc(data.repo.blobBase + p.split('/').map(encodeURIComponent).join('/'))}" target="_blank" rel="noopener">${esc(p)}</a>` : esc(p));
+  return `<p class="sub" style="margin-top:0">These files were not read, so any vulnerabilities in them are not reflected in the rating or findings.</p>` +
+    [...byWhy].map(([why, paths]) => `<h3>${esc(why[0].toUpperCase() + why.slice(1))} · ${fmt(paths.length)}</h3>
+      <ul class="plain mono not-reviewed">${paths.slice(0, LIMIT).map((p) => `<li>${link(p)}</li>`).join('')}</ul>
+      ${paths.length > LIMIT ? `<p class="sub">…and ${fmt(paths.length - LIMIT)} more (all are listed in the downloadable JSON report).</p>` : ''}`).join('');
 }
 
 function renderConcerns(data) {

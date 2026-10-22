@@ -198,3 +198,13 @@ tr.rule:hover td { background: var(--panel-2); }
   .fold > summary { flex-wrap: wrap; }
   .fold-meta { margin-left: 0; width: 100%; justify-content: flex-start; text-align: left; order: 3; }
 }
+
+/* Partial scan */
+.partial-banner { border-color: rgba(255, 159, 67, 0.5); background: rgba(255, 159, 67, 0.08); }
+.partial-banner b { color: var(--high); }
+.partial-banner button.link { font-family: inherit; font-size: inherit; padding: 0; text-decoration: underline; }
+.stat-warn { box-shadow: inset 0 0 0 1px rgba(255, 159, 67, 0.55); }
+.stat-warn b { color: var(--high); }
+ul.not-reviewed { columns: 2; column-gap: 24px; font-size: 12.5px; }
+ul.not-reviewed li { break-inside: avoid; word-break: break-all; }
+@media (max-width: 760px) { ul.not-reviewed { columns: 1; } }

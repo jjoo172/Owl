@@ -3,7 +3,7 @@
 // result pins the exact commit that step 2 will scan.
 
 import { parseRepoInput, codeloadUrl } from './github.js';
-import { aiAvailable, DEFAULT_MODEL } from './ai.js';
+import { aiAvailable, DEFAULT_MODEL, SOURCE_BUDGET } from './ai.js';
 
 export const modelLabel = (id = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL) =>
   id.replace(/^claude-/, '').replace(/-(\d+)-(\d+)(?:-\d{8})?$/, ' $1.$2').replace(/^\w/, (c) => 'Claude ' + c.toUpperCase());
@@ -107,6 +107,15 @@ export async function checkRepository(input, refOverride) {
     const share = Math.round((100 * cBytes) / total);
     if (cBytes === 0) add('language', 'Contains C/C++ source', 'warn', 'GitHub detects no C or C++ in this repository, so the scan will likely find nothing to analyse.');
     else add('language', 'Contains C/C++ source', 'pass', `${share}% C/C++ by size (${C_FAMILY.filter((l) => languages[l]).join(', ')})`);
+    // Forecast whether Claude can read it all (GitHub's byte count includes tests, so this is approximate).
+    if (cBytes > 0 && aiAvailable()) {
+      if (cBytes <= SOURCE_BUDGET) add('coverage', 'Review coverage', 'pass', 'Small enough for Claude to review the whole codebase');
+      else {
+        const pct = Math.max(0.1, Math.round((1000 * SOURCE_BUDGET) / cBytes) / 10);
+        add('coverage', 'Review coverage', 'warn',
+          `Expect a partial scan: about ${pct}% of this repository's ${cBytes >= 1e6 ? `${(cBytes / 1e6).toFixed(cBytes >= 1e7 ? 0 : 1)} MB` : `${Math.round(cBytes / 1e3)} KB`} of C/C++ fits in one review, so Claude will read the riskiest files first`);
+      }
+    }
   } else {
     add('language', 'Contains C/C++ source', 'warn', langs.problem || 'Could not read the language breakdown; continuing anyway.');
   }

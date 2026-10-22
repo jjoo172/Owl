@@ -3,7 +3,7 @@ import { costUsd } from './budget.js';
 
 // How much source (in characters) Claude may read in full. ~150k chars ≈ 40k tokens,
 // comfortably under Haiku 5.5's 100k-token pricing threshold.
-const SOURCE_BUDGET = Number(process.env.AI_SOURCE_BUDGET_CHARS || 150_000);
+export const SOURCE_BUDGET = Number(process.env.AI_SOURCE_BUDGET_CHARS || 150_000);
 
 const SYSTEM_PROMPT = `You are an expert C++ safety researcher, who is well-versed in common memory vulnerabilities and exploits. We want to use your expertise to scan a given github codebase, and identify all areas in the code that look to be risky (e.g. memory-unsafe code). Then, provide a general summary of the overall risk level of introducing this open source repository into your critical code path. Look only at the source code to determine risk level, ignoring text-based documents.
 
@@ -39,7 +39,7 @@ export function selectSourceForReview(contentByPath, budget = SOURCE_BUDGET) {
   const pool = nonTest.length ? nonTest : all;
   const total = pool.reduce((s, [, c]) => s + c.length, 0);
   if (total <= budget) {
-    return { mode: 'full', files: pool.map(([path]) => path), skipped: [], totalFiles: pool.length };
+    return { mode: 'full', files: pool.map(([path]) => path), skipped: [], totalFiles: pool.length, reviewedChars: total, totalChars: total };
   }
 
   const ranked = pool
@@ -62,7 +62,9 @@ export function selectSourceForReview(contentByPath, budget = SOURCE_BUDGET) {
   // Always give Claude something to read: fall back to the top-ranked file, truncated to fit.
   if (!files.length && ranked.length) files.push(ranked[0].path);
   const chosen = new Set(files);
-  return { mode: 'partial', files, skipped: pool.map(([p]) => p).filter((p) => !chosen.has(p)), totalFiles: pool.length };
+  // A lone oversized file is sent truncated to the budget, so count at most that much of it.
+  const reviewedChars = Math.min(budget, ranked.filter((f) => chosen.has(f.path)).reduce((n, f) => n + f.size, 0));
+  return { mode: 'partial', files, skipped: pool.map(([p]) => p).filter((p) => !chosen.has(p)), totalFiles: pool.length, reviewedChars, totalChars: total };
 }
 
 export function aiAvailable() {
@@ -214,7 +216,14 @@ export async function aiReview({ budget, ...args }) {
         model: data.model,
         usage: data.usage,
         costUsd: actualCost,
-        coverage: { mode: selection.mode, filesInFull: selection.files.length, totalFiles: selection.totalFiles },
+        coverage: {
+          mode: selection.mode,
+          filesInFull: selection.files.length,
+          totalFiles: selection.totalFiles,
+          reviewedChars: selection.reviewedChars,
+          totalChars: selection.totalChars,
+          skipped: selection.skipped,
+        },
       },
     };
   } finally {

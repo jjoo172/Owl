@@ -53,7 +53,11 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
     results = report;
   }
 
+  const coverage = buildCoverage({ tier, aiCoverage: aiResult?.coverage, files, fetchStats });
+  if (aiResult?.coverage) delete aiResult.coverage.skipped; // listed once, in coverage.notReviewed
+
   return {
+    coverage,
     repo: {
       owner: repo.owner,
       name: repo.repo,
@@ -76,5 +80,50 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
     tierReason,
     ai: aiResult,
     aiEnabled: aiAvailable(),
+  };
+}
+
+/**
+ * What share of the repository's C/C++ the results actually cover, and why anything was left out.
+ * `complete: false` = a partial scan; the UI says so prominently.
+ */
+export function buildCoverage({ tier, aiCoverage, files, fetchStats }) {
+  const reasons = [];
+  const notReviewed = [];
+  let reviewedFiles;
+  let totalFiles;
+  let reviewedChars;
+  let totalChars;
+
+  if (tier === 'full' && aiCoverage) {
+    reviewedFiles = aiCoverage.filesInFull;
+    totalFiles = aiCoverage.totalFiles;
+    reviewedChars = aiCoverage.reviewedChars ?? 0;
+    totalChars = aiCoverage.totalChars ?? 0;
+    for (const path of aiCoverage.skipped || []) notReviewed.push({ path, why: 'did not fit in the review' });
+    if ((aiCoverage.skipped || []).length) {
+      reasons.push(`The repository is too large for one review, so Claude read the ${reviewedFiles.toLocaleString()} riskiest of ${totalFiles.toLocaleString()} source files`);
+    }
+  } else {
+    reviewedFiles = totalFiles = files.length;
+    reviewedChars = totalChars = files.reduce((n, f) => n + f.content.length, 0);
+  }
+
+  const large = fetchStats.skippedLarge || [];
+  if (large.length) {
+    totalFiles += large.length;
+    for (const path of large) notReviewed.push({ path, why: 'over 1 MB (usually generated code)' });
+    reasons.push(`${large.length.toLocaleString()} file${large.length === 1 ? ' was' : 's were'} skipped for being over 1 MB`);
+  }
+  if (fetchStats.truncated) reasons.push("The repository has more source files than this server reads, so the rest weren't read at all");
+
+  const percent = totalChars ? Math.max(0.1, Math.round((1000 * reviewedChars) / totalChars) / 10) : 100;
+  return {
+    complete: reasons.length === 0,
+    reviewedFiles,
+    totalFiles,
+    percent: reasons.length === 0 ? 100 : Math.min(percent, 99.9),
+    reasons,
+    notReviewed,
   };
 }

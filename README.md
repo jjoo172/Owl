@@ -25,6 +25,10 @@ files are read (`.c`, `.cc`, `.cpp`, `.h`, `.hpp`, …); docs and other text fil
   plus an overall risk rating, a summary and recommendations. That list *is* the result: every
   reported vulnerability is shown and counted, at every severity. A finding whose cited line doesn't
   match the source is still shown, flagged "exact line not found — check nearby".
+- **Partial scans are labelled as such.** When a repository is too big for one review (or files are
+  skipped for being over 1 MB, or the server's file cap is hit), the result is a *partial scan*: step 1
+  forecasts it, the results open with a banner giving the share of code reviewed and why, the rating
+  is marked "(partial scan)", and a "Not reviewed" section lists every file that wasn't read.
 - **Basic scan (fallback only).** If Claude can't run — no `ANTHROPIC_API_KEY`, the visitor's
   daily budget is used up, API credits have run out, the API is rate-limited or overloaded (after
   one automatic retry), or the review times out — Owl runs a regex pattern scanner instead (~25
