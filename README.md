@@ -7,58 +7,32 @@ putting it in your critical code path. It looks **only at source code**
 (`.c`, `.cc`, `.cpp`, `.h`, `.hpp`, …) — READMEs, docs, build scripts and other
 text files are ignored.
 
-## Scan tiers
-
-Every scan is a **full review**: Claude reads the C/C++ source like a security auditor, and its
-findings are merged with a fast pattern scan. If Claude can't run — no `ANTHROPIC_API_KEY`, the
-visitor's daily budget is used up, API credits have run out, the API is rate-limited or
-overloaded (after one automatic retry), or the review times out — Owl falls back to a
-**basic scan** (pattern matching only). The fallback is never silent: step 1 shows which tier
-to expect, and basic results open with a banner giving the reason and what the scan misses.
-Basic results are never cached, so a re-run can get the full review once Claude is available.
-
 ## How it works
 
 Every scan runs in two steps.
 
-**Step 1 — access check** (`GET /api/check?repo=…&ref=…`, plain JSON, no scanning). Confirms, one
-check at a time and with a reason for each: the address is a GitHub repo, it exists and is public,
-the branch/tag/commit resolves to a commit, it contains C/C++, it's within size limits, and the
-source archive for that commit actually downloads. It also reports whether the Claude review is
-enabled. Step 2 only starts if nothing failed.
+**Step 1 — access check** (`GET /api/check?repo=…&ref=…`, plain JSON). Confirms, with a reason for
+each check, that the address is a GitHub repo, it exists and is public, the branch/tag/commit
+resolves to a commit, it contains C/C++, it's within size limits and its source archive downloads.
+It also shows which scan tier to expect. Step 2 only starts if nothing failed.
 
-**Step 2 — scan** (`POST /api/scan`, streamed progress) of exactly the commit step 1 confirmed:
+**Step 2 — scan** (`POST /api/scan`, streamed progress) of exactly that commit. Only C/C++ source
+files are read (`.c`, `.cc`, `.cpp`, `.h`, `.hpp`, …); docs and other text files are ignored.
 
-1. **Download** — streams the source archive for that commit and keeps only C/C++ source files.
-2. **Pattern scan** — strips comments and string literals, then checks every line against
-   ~20 rules mapped to CWEs:
+- **Full review (default).** Claude, prompted as an expert C++ safety researcher, reads the source
+  — every non-test file when the repo fits in ~150k characters, otherwise the riskiest files first —
+  and reports every vulnerability it finds: file, line, severity, category, CWE and explanation,
+  plus an overall risk rating, a summary and recommendations. That list *is* the result: every
+  reported vulnerability is shown and counted, at every severity. A finding whose cited line doesn't
+  match the source is still shown, flagged "exact line not found — check nearby".
+- **Basic scan (fallback only).** If Claude can't run — no `ANTHROPIC_API_KEY`, the visitor's
+  daily budget is used up, API credits have run out, the API is rate-limited or overloaded (after
+  one automatic retry), or the review times out — Owl runs a regex pattern scanner instead (~25
+  CWE-mapped rules for unbounded copies, format strings, manual memory management, a few lifetime
+  patterns, …). The fallback is never silent: basic results open with a banner giving the reason
+  and what pattern matching misses, and are never cached so a re-run can get the full review.
 
-   | Severity | Examples |
-   | --- | --- |
-   | Critical | `gets()` |
-   | High | `strcpy`/`strcat`, `sprintf`, `scanf("%s")`, non-literal format strings, `alloca`, `system`/`popen`/`exec*` |
-   | Medium | `memcpy`/`memmove`, `strncpy`, `n * size` in allocations, `p = realloc(p, …)`, VLAs, `setjmp`/`longjmp`, inline asm, `mprotect`, sanitizer opt-outs |
-   | Low | raw `malloc`/`free`, raw `new`/`delete`, `reinterpret_cast`/`const_cast`, fixed stack buffers, `atoi`, `strtok` |
-
-   Test, fuzz, example and benchmark code is labelled and counted at 20% weight; vendored
-   (`third_party/`, `contrib/`, …) code is labelled but counted in full.
-3. **Risk rating** — severity-weighted hits per 1,000 lines of non-test code give a
-   Low / Moderate / High / Critical rating, adjusted for critical/high hits and offset
-   notes for modern C++ idioms (smart pointers, spans, containers) and fuzz harnesses.
-4. **Expert review (optional)** — if `ANTHROPIC_API_KEY` is set, Claude (prompted as an expert
-   C++ safety researcher) reads the source itself: every non-test file when the repo fits in
-   ~150k characters, otherwise the highest-risk files in full plus excerpts around other hits.
-   It returns a structured review (via a forced tool call) that Owl merges into the results:
-   - **new findings** for bugs the patterns can't see (dangling references, invalidated
-     iterators, undefined behaviour, data races…), each with file, line, severity and reason;
-   - **confirmations** of scanner hits, with the severity Claude judges correct;
-   - **dismissals** of scanner hits that are safe in context (kept visible, not counted).
-
-   Severity counts, the issue table, hotspots and the findings list all reflect the merged
-   result; every finding is labelled as scanner-only, found by Claude, confirmed or dismissed.
-   Findings citing a file or line that doesn't exist are shown with a warning and never counted.
-
-Pattern matching finds *candidates*, not confirmed bugs — treat findings as a review checklist.
+Findings come from an automated review (Claude, or pattern matching on a basic scan) — verify each one before acting on it.
 
 ## Run locally
 

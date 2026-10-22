@@ -39,17 +39,18 @@ if (json) {
   process.exit(0);
 }
 
-const { stats, risk, ruleSummary, hotspots, ai } = result;
-console.log(`\n${result.repo.owner}/${result.repo.name} @ ${result.repo.sha}`);
+const { stats, risk, findings, ai } = result;
+console.log(`\n${result.repo.owner}/${result.repo.name} @ ${result.repo.sha || 'local'}`);
 console.log(`Source files: ${stats.sourceFiles}  Lines: ${stats.loc}  Findings: ${stats.totalFindings}`);
-console.log(`Scanner risk: ${risk.level} (score ${risk.score}/100, density ${risk.density}/KLOC)`);
-risk.rationale.forEach((r) => console.log(`  - ${r}`));
-console.log('\nRule hits:');
-for (const r of ruleSummary) console.log(`  [${r.severity.padEnd(8)}] ${String(r.count).padStart(5)}  ${r.title}`);
-console.log('\nHotspots:');
-for (const h of hotspots.slice(0, 8)) console.log(`  ${String(h.weighted).padStart(7)}  ${h.file}${h.kind !== 'production' ? ` (${h.kind})` : ''}`);
-if (ai) {
-  console.log(`\nAI review (${ai.model}): ${ai.overall_risk}\n${ai.summary}`);
+if (result.tier === 'full') {
+  console.log(`Full review (${ai.model}${typeof ai.costUsd === 'number' ? `, $${ai.costUsd.toFixed(4)}` : ''}): ${ai.overall_risk} risk\n\n${ai.summary}\n`);
 } else {
-  console.log(`\nBasic scan (pattern matching only): ${result.tierReason}.`);
+  console.log(`BASIC SCAN (pattern matching only) — ${result.tierReason}.`);
+  console.log(`Rating: ${risk.level} (score ${risk.score}/100) — a lower bound`);
+  risk.rationale.forEach((r) => console.log(`  - ${r}`));
+  console.log('');
+}
+for (const f of findings.filter((x) => result.tier === 'full' || x.severity !== 'low').slice(0, 60)) {
+  const what = f.title || f.ruleId;
+  console.log(`  [${f.severity.padEnd(8)}] ${`${f.file}:${f.line}`.padEnd(32)} ${what}`);
 }

@@ -1,33 +1,29 @@
-import { contextFor, classifyPath } from './scanner.js';
-import { SEVERITY_ORDER } from './rules.js';
+import { classifyPath } from './scanner.js';
 import { costUsd } from './budget.js';
 
-// How much source (in characters) Claude may read in full. ~150k chars ≈ 40k tokens.
+// How much source (in characters) Claude may read in full. ~150k chars ≈ 40k tokens,
+// comfortably under Haiku 5.5's 100k-token pricing threshold.
 const SOURCE_BUDGET = Number(process.env.AI_SOURCE_BUDGET_CHARS || 150_000);
 
 const SYSTEM_PROMPT = `You are an expert C++ safety researcher, who is well-versed in common memory vulnerabilities and exploits. We want to use your expertise to scan a given github codebase, and identify all areas in the code that look to be risky (e.g. memory-unsafe code). Then, provide a general summary of the overall risk level of introducing this open source repository into your critical code path. Look only at the source code to determine risk level, ignoring text-based documents.
 
-You will receive:
-1. Summary output of a regex-based pattern scanner. Its hits are candidates, not confirmed bugs, and it is BLIND to most modern C++ memory-safety bugs.
-2. A list of individual scanner hits, each with an ID like S12.
-3. Line-numbered source code: every non-test source file in full when the repository is small enough, otherwise the highest-risk files in full plus short excerpts around other scanner hits.
+You will receive the repository's C/C++ source, line-numbered: every non-test source file when the repository is small enough, otherwise the highest-risk files (with a list of the files you were not shown).
 
-Review the source yourself, as a security auditor would. Do not limit yourself to what the scanner flagged — a clean scanner result says little. In particular look for:
+Review it as a security auditor would, file by file. Look for every vulnerability, including:
 - Lifetime bugs: dangling references/pointers/string_views/spans (including views into buffers that are later reused or freed), references to temporaries (including default arguments and members of temporaries in range-for), returning references to locals, lambdas capturing by reference that outlive their scope.
 - Invalidation: holding references, pointers or iterators into containers across push_back/insert/erase/rehash.
 - Undefined behaviour: signed integer overflow, oversized or negative shifts, misaligned access and strict-aliasing violations via reinterpret_cast/type punning, out-of-bounds reads/writes, unsigned wraparound in bounds checks (e.g. offset + size overflowing), lengths never checked against the real buffer, comparators that are not strict weak orderings, use of moved-from objects, uninitialised reads.
 - Concurrency: data races on non-atomic state, unsynchronised containers, captured references shared across threads.
-- Classic C issues: unbounded copies, format strings, manual malloc/free, integer overflow in allocation sizes.
+- Classic C issues: unbounded copies (strcpy, sprintf, gets), format strings, manual malloc/free mistakes, integer overflow in allocation sizes, command injection.
 
 Report your results by calling the report_review tool exactly once:
-- findings: every distinct bug you are confident about, one entry per bug (not per theme), at the line where it occurs, ordered by severity. Cite only path:line locations from the numbered source you were shown — never invent code. When a finding corresponds to scanner hits, list their IDs in scanner_ids (this confirms them). If the scanner flagged the right line but at the wrong severity, give the severity you believe is right.
-- dismissed: scanner hits you have checked in context and believe are NOT a problem, with a short reason. Leave a hit out of both lists if you could not judge it.
+- findings: every distinct vulnerability you are confident about, one entry per bug (not per theme), at the line where it occurs, ordered by severity. Cite only path:line locations from the numbered source you were shown — never invent code. Include low-severity issues too.
 - Severity: critical = likely exploitable memory corruption; high = memory-unsafe or UB that can corrupt/leak memory or crash; medium = UB or misuse that is dangerous under plausible conditions; low = hardening issue or fragile code.
-If you only saw part of the repository, say how that limits your confidence in the summary.`;
+- overall_risk reflects the risk of putting this code in a critical path. If you only saw part of the repository, say how that limits your confidence in the summary.`;
 
-// Signals that a file is likely to hide lifetime / UB bugs the scanner can't see.
-const SUBTLE_RISK_SIGNALS =
-  /std::(?:string_view|span)|\[&|\bstd::thread\b|std::async|\.detach\s*\(|reinterpret_cast|\.data\s*\(\)|&\s*\w+\s*=\s*\w+[.\-]|<<\s*[a-z_]|\bstd::sort\b|\bmemcpy\b|\bnew\b|\bdelete\b/g;
+// Signals that a file is worth reading first when the whole repo doesn't fit.
+const RISK_SIGNALS =
+  /std::(?:string_view|span)|\[&|\bstd::thread\b|std::async|\.detach\s*\(|reinterpret_cast|\.data\s*\(\)|<<\s*[a-z_]|\bstd::sort\b|\b(?:memcpy|memmove|strcpy|strcat|sprintf|gets|alloca|malloc|realloc|free|system|popen)\s*\(|\bnew\b|\bdelete\b/g;
 
 function numbered(content) {
   return content
@@ -36,22 +32,22 @@ function numbered(content) {
     .join('\n');
 }
 
-/** Chooses which files Claude reads in full, within the character budget. */
-export function selectSourceForReview(contentByPath, hotspots, budget = SOURCE_BUDGET) {
+/** Chooses which files Claude reads, within the character budget (riskiest first). */
+export function selectSourceForReview(contentByPath, budget = SOURCE_BUDGET) {
   const all = [...contentByPath.entries()];
   const nonTest = all.filter(([p]) => classifyPath(p) !== 'test');
   const pool = nonTest.length ? nonTest : all;
   const total = pool.reduce((s, [, c]) => s + c.length, 0);
   if (total <= budget) {
-    return { mode: 'full', files: pool.map(([path]) => path), totalFiles: pool.length };
+    return { mode: 'full', files: pool.map(([path]) => path), skipped: [], totalFiles: pool.length };
   }
 
-  const hotRank = new Map(hotspots.map((h, i) => [h.file, hotspots.length - i]));
   const ranked = pool
     .map(([path, content]) => ({
       path,
       size: content.length,
-      score: (hotRank.get(path) || 0) * 20 + (content.match(SUBTLE_RISK_SIGNALS) || []).length * 2 - content.length / 4000,
+      // Density of risky constructs, with a nudge towards production (non-vendored) code.
+      score: ((content.match(RISK_SIGNALS) || []).length / Math.max(1, content.length / 1000)) * (classifyPath(path) === 'vendored' ? 0.5 : 1),
     }))
     .sort((a, b) => b.score - a.score);
 
@@ -65,46 +61,12 @@ export function selectSourceForReview(contentByPath, hotspots, budget = SOURCE_B
   }
   // Always give Claude something to read: fall back to the top-ranked file, truncated to fit.
   if (!files.length && ranked.length) files.push(ranked[0].path);
-  return { mode: 'partial', files, totalFiles: pool.length };
-}
-
-/** Severity-ordered sample of hits in files Claude is NOT reading in full. */
-function sampleFindings(findings, skipFiles, max = 40) {
-  const pool = findings.filter((f) => f.kind !== 'test' && !skipFiles.has(f.file) && f.severity !== 'low');
-  const picked = [];
-  const perFile = new Map();
-  for (const sev of SEVERITY_ORDER) {
-    const byRule = new Map();
-    for (const f of pool.filter((x) => x.severity === sev)) {
-      if (!byRule.has(f.ruleId)) byRule.set(f.ruleId, []);
-      byRule.get(f.ruleId).push(f);
-    }
-    const queues = [...byRule.values()];
-    while (picked.length < max && queues.some((q) => q.length)) {
-      for (const q of queues) {
-        const f = q.shift();
-        if (!f || (perFile.get(f.file) || 0) >= 4) continue;
-        perFile.set(f.file, (perFile.get(f.file) || 0) + 1);
-        picked.push(f);
-        if (picked.length >= max) break;
-      }
-    }
-  }
-  return picked;
+  const chosen = new Set(files);
+  return { mode: 'partial', files, skipped: pool.map(([p]) => p).filter((p) => !chosen.has(p)), totalFiles: pool.length };
 }
 
 export function aiAvailable() {
   return Boolean(process.env.ANTHROPIC_API_KEY);
-}
-
-/** Scanner hits Claude is asked to confirm or dismiss, each with a short ID. */
-function reviewableHits(allFindings, fullSet, max = 200) {
-  const sevRank = Object.fromEntries(SEVERITY_ORDER.map((s, i) => [s, i]));
-  return allFindings
-    .filter((f) => f.kind !== 'test' && (f.severity !== 'low' || fullSet.has(f.file)))
-    .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.file.localeCompare(b.file) || a.line - b.line)
-    .slice(0, max)
-    .map((f, i) => ({ id: `S${i + 1}`, finding: f }));
 }
 
 const SEVERITY_ENUM = ['critical', 'high', 'medium', 'low'];
@@ -118,34 +80,24 @@ const REVIEW_TOOL = {
       summary: { type: 'string', description: '2-4 short paragraphs: what the code does, dominant risk themes, and whether it is reasonable for a critical path.' },
       findings: {
         type: 'array',
-        maxItems: 40,
+        maxItems: 60,
         items: {
           type: 'object',
           properties: {
             title: { type: 'string', description: 'Short name of the bug, e.g. "Dangling string_view into reused line buffer".' },
             severity: { type: 'string', enum: SEVERITY_ENUM },
-            category: { type: 'string', description: 'e.g. Use-after-free, Dangling reference, Out-of-bounds read, Signed integer overflow, Data race, Strict aliasing.' },
+            category: { type: 'string', description: 'e.g. Use-after-free, Dangling reference, Out-of-bounds read, Signed integer overflow, Data race, Strict aliasing, Buffer overflow.' },
             cwe: { type: 'string', description: 'e.g. CWE-416. Optional.' },
             file: { type: 'string', description: 'Path exactly as shown in the source headers.' },
             line: { type: 'integer', minimum: 1 },
             detail: { type: 'string', description: 'Why this is a bug and how it fails, 1-3 sentences.' },
-            scanner_ids: { type: 'array', items: { type: 'string' }, description: 'IDs of scanner hits this finding confirms, if any.' },
           },
           required: ['title', 'severity', 'category', 'file', 'line', 'detail'],
         },
       },
-      dismissed: {
-        type: 'array',
-        maxItems: 100,
-        items: {
-          type: 'object',
-          properties: { scanner_id: { type: 'string' }, reason: { type: 'string' } },
-          required: ['scanner_id', 'reason'],
-        },
-      },
       recommendations: { type: 'array', items: { type: 'string' }, maxItems: 8 },
     },
-    required: ['overall_risk', 'summary', 'findings', 'dismissed', 'recommendations'],
+    required: ['overall_risk', 'summary', 'findings', 'recommendations'],
   },
 };
 
@@ -174,12 +126,8 @@ function unavailableFromResponse(status, data) {
 }
 
 
-export function buildReviewRequest({ repo, report, allFindings, contentByPath }) {
-  const selection = selectSourceForReview(contentByPath, report.hotspots);
-  const fullSet = new Set(selection.files);
-  const sample = sampleFindings(allFindings, fullSet);
-  const hits = reviewableHits(allFindings, fullSet);
-
+export function buildReviewRequest({ repo, contentByPath }) {
+  const selection = selectSourceForReview(contentByPath);
   const fullSource = selection.files
     .map((p) => {
       let src = numbered(contentByPath.get(p));
@@ -188,42 +136,15 @@ export function buildReviewRequest({ repo, report, allFindings, contentByPath })
     })
     .join('\n\n');
 
-  const excerpts = sample
-    .map((f) => {
-      const ctx = contextFor(contentByPath.get(f.file), f.line, 4)
-        .map((l) => `${String(l.n).padStart(5)}${l.n === f.line ? ' >' : '  '} ${l.text}`)
-        .join('\n');
-      return `### [${f.severity}] ${f.ruleId} — ${f.file}:${f.line}\n\`\`\`cpp\n${ctx}\n\`\`\``;
-    })
-    .join('\n\n');
+  const coverage =
+    selection.mode === 'full'
+      ? `All ${selection.totalFiles} non-test C/C++ source files are included below.`
+      : `${selection.files.length} of ${selection.totalFiles} non-test C/C++ source files are included below (riskiest first). Not shown: ${selection.skipped.slice(0, 300).join(', ')}${selection.skipped.length > 300 ? ', …' : ''}.`;
 
-  const hitList = hits.map(({ id, finding: f }) => `${id} [${f.severity}] ${f.ruleId} ${f.file}:${f.line} | ${f.code.slice(0, 140)}`).join('\n');
-
-  const input = {
-    repository: `${repo.owner}/${repo.repo}${repo.ref ? '@' + repo.ref : ''}`,
-    source_coverage:
-      selection.mode === 'full'
-        ? `All ${selection.totalFiles} non-test source files are included in full below.`
-        : `${selection.files.length} of ${selection.totalFiles} non-test source files are included in full (chosen by risk); others appear only as excerpts around scanner hits.`,
-    stats: report.stats,
-    scanner_risk_estimate: report.risk,
-    rule_hits: report.ruleSummary.map(({ ruleId, title, severity, cwe, count, productionCount, files }) => ({ ruleId, title, severity, cwe, count, productionCount, files })),
-    modern_cpp_signals: report.mitigations,
-  };
-
-  const userContent = [
-    `Scanner summary (JSON):\n${JSON.stringify(input, null, 1)}`,
-    hitList ? `Individual scanner hits to confirm or dismiss (${hits.length}${hits.length >= 200 ? ', most severe first; others omitted' : ''}):\n${hitList}` : 'The scanner flagged no individual hits for review.',
-    fullSource ? `Full source files (line-numbered):\n\n${fullSource}` : '',
-    excerpts ? `Excerpts around scanner hits in other files (">" marks the flagged line):\n\n${excerpts}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n');
-
-  return { userContent, selection, excerptCount: sample.length, hits };
+  const userContent = `Repository: ${repo.owner}/${repo.repo}${repo.ref ? '@' + repo.ref : ''}\n${coverage}\n\n${fullSource}`;
+  return { userContent, selection };
 }
 
-/** Worst-case cost of a review call: conservative input estimate + the full output allowance. */
 export function estimateReviewCost(model, userContent, maxTokens) {
   const inputTokens = Math.ceil((SYSTEM_PROMPT.length + JSON.stringify(REVIEW_TOOL).length + userContent.length) / 3);
   return costUsd(model, inputTokens, maxTokens);
@@ -235,7 +156,7 @@ export function estimateReviewCost(model, userContent, maxTokens) {
  * settled with the real cost from the API's reported token usage.
  */
 export async function aiReview({ budget, ...args }) {
-  const { userContent, selection, excerptCount, hits } = buildReviewRequest(args);
+  const { userContent, selection } = buildReviewRequest(args);
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 8000);
 
@@ -289,12 +210,11 @@ export async function aiReview({ budget, ...args }) {
     if (data.stop_reason === 'max_tokens') throw new ReviewUnavailableError("Claude's review was cut off before it finished", 'incomplete');
     return {
       review: call.input,
-      hits,
       meta: {
         model: data.model,
         usage: data.usage,
         costUsd: actualCost,
-        coverage: { mode: selection.mode, filesInFull: selection.files.length, totalFiles: selection.totalFiles, excerpts: excerptCount, scannerHitsReviewed: hits.length },
+        coverage: { mode: selection.mode, filesInFull: selection.files.length, totalFiles: selection.totalFiles },
       },
     };
   } finally {

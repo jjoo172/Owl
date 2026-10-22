@@ -62,6 +62,23 @@ export function scanFile(path, content) {
   return { path, kind, language: languageOf(path), loc, findings, mitigations };
 }
 
+/** Size and language breakdown of the source, independent of any scanning. */
+export function summarizeFiles(files) {
+  const byLanguage = {};
+  const filesByKind = { production: 0, vendored: 0, test: 0 };
+  const locByKind = { production: 0, vendored: 0, test: 0 };
+  let loc = 0;
+  for (const { path, content } of files) {
+    const lines = stripCommentsAndStrings(content).split('\n').filter((l) => l.trim()).length;
+    const kind = classifyPath(path);
+    loc += lines;
+    byLanguage[languageOf(path)] = (byLanguage[languageOf(path)] || 0) + lines;
+    filesByKind[kind]++;
+    locByKind[kind] += lines;
+  }
+  return { sourceFiles: files.length, loc, byLanguage, filesByKind, locByKind };
+}
+
 export function contextFor(content, line, radius = 3) {
   const lines = content.split('\n');
   const start = Math.max(1, line - radius);

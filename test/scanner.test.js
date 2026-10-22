@@ -86,26 +86,34 @@ test('lifetime / UB rules', () => {
   assert.ok(!cpp('return (1u << 4) - 1u;').includes('variable-shift'));
 });
 
-test('AI review gets full source for small repos, a prioritised subset for large ones', async () => {
+test('Claude reads the whole repo when it fits, otherwise the riskiest files first', async () => {
   const { selectSourceForReview, buildReviewRequest } = await import('../src/ai.js');
   const small = new Map([['src/a.cpp', 'int a;'], ['src/b.cpp', 'int b;'], ['tests/t.cpp', 'int t;']]);
-  const s = selectSourceForReview(small, []);
+  const s = selectSourceForReview(small);
   assert.equal(s.mode, 'full');
   assert.deepEqual(s.files.sort(), ['src/a.cpp', 'src/b.cpp']); // tests excluded
 
   const big = new Map([
-    ['src/hot.cpp', 'x'.repeat(400)],
-    ['src/subtle.cpp', 'std::string_view v; [&]{}; reinterpret_cast<int*>(p);' + 'y'.repeat(300)],
     ['src/plain.cpp', 'z'.repeat(400)],
+    ['src/risky.c', 'strcpy(a,b); sprintf(c,d); memcpy(e,f,g);' + 'y'.repeat(300)],
+    ['src/subtle.cpp', 'std::string_view v; [&]{}; reinterpret_cast<int*>(p);' + 'y'.repeat(300)],
   ]);
-  const p = selectSourceForReview(big, [{ file: 'src/hot.cpp' }], 1000);
+  const p = selectSourceForReview(big, 800);
   assert.equal(p.mode, 'partial');
-  assert.deepEqual(p.files, ['src/hot.cpp', 'src/subtle.cpp']);
+  assert.deepEqual(p.files.sort(), ['src/risky.c', 'src/subtle.cpp']);
+  assert.deepEqual(p.skipped, ['src/plain.cpp']);
 
-  const report = scanRepository([...small].map(([path, content]) => ({ path, content })));
-  const req = buildReviewRequest({ repo: { owner: 'o', repo: 'r' }, report, allFindings: report._allFindings, contentByPath: report._contentByPath });
+  const req = buildReviewRequest({ repo: { owner: 'o', repo: 'r' }, contentByPath: small });
   assert.match(req.userContent, /### FILE src\/a\.cpp/);
-  assert.match(req.userContent, /All 2 non-test source files are included in full/);
+  assert.match(req.userContent, /All 2 non-test C\/C\+\+ source files are included/);
+  assert.doesNotMatch(req.userContent, /scanner/i, 'no scanner output is sent to Claude');
+});
+
+test('AI selection never comes back empty', async () => {
+  const { selectSourceForReview } = await import('../src/ai.js');
+  const huge = new Map([['src/a.c', 'a'.repeat(5000)], ['src/b.c', 'strcpy(x,y);' + 'b'.repeat(5000)]]);
+  const s = selectSourceForReview(huge, 1000);
+  assert.deepEqual(s.files, ['src/b.c']);
 });
 
 test('path classification', () => {
@@ -129,11 +137,4 @@ test('repo input parsing', () => {
   assert.deepEqual(parseRepoInput('https://github.com/madler/zlib.git'), { owner: 'madler', repo: 'zlib', ref: undefined });
   assert.deepEqual(parseRepoInput('github.com/a/b/tree/dev'), { owner: 'a', repo: 'b', ref: 'dev' });
   assert.throws(() => parseRepoInput('not a repo'));
-});
-
-test('AI selection never comes back empty', async () => {
-  const { selectSourceForReview } = await import('../src/ai.js');
-  const huge = new Map([['src/a.c', 'a'.repeat(5000)], ['src/b.c', 'b'.repeat(5000)]]);
-  const s = selectSourceForReview(huge, [{ file: 'src/b.c' }], 1000);
-  assert.deepEqual(s.files, ['src/b.c']);
 });
