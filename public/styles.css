@@ -161,3 +161,10 @@ tr.rule:hover td { background: var(--panel-2); }
   .filters input[type="search"] { width: 100%; }
   .hide-sm { display: none; }
 }
+
+/* Claude review markers */
+.pill.claude { border-color: rgba(245, 185, 66, 0.55); color: var(--accent); }
+.pill.warn { border-color: rgba(255, 93, 108, 0.5); color: var(--critical); }
+.ai-note { margin-top: 6px; font-size: 13.5px; color: var(--text); }
+.finding.dismissed { opacity: 0.6; }
+.filters select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 13px; }

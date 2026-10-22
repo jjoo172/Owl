@@ -2,6 +2,7 @@ import { basename, resolve } from 'node:path';
 import { fetchSourceFiles, readLocalSourceFiles, UserError } from './github.js';
 import { scanRepository } from './scanner.js';
 import { aiAvailable, aiReview } from './ai.js';
+import { mergeReview } from './merge.js';
 
 /**
  * Step 2: download the confirmed commit → scan source → (optional) expert review.
@@ -20,12 +21,16 @@ export async function analyze(target, { dir, ai = true, onProgress = () => {} } 
   const report = scanRepository(files);
   const { _contentByPath, _allFindings, ...publicReport } = report;
 
+  let results = publicReport;
   let aiResult = null;
   let aiError = null;
   if (ai && aiAvailable() && files.length) {
     onProgress('Expert review with Claude');
     try {
-      aiResult = await aiReview({ repo, report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath });
+      const review = await aiReview({ repo, report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath });
+      const merged = mergeReview({ report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath, ai: review });
+      aiResult = merged.ai;
+      results = { ...publicReport, stats: merged.stats, ruleSummary: merged.ruleSummary, hotspots: merged.hotspots, findings: merged.findings };
     } catch (err) {
       aiError = err.name === 'AbortError' ? 'AI review timed out.' : `AI review failed: ${err.message}`;
     }
@@ -49,7 +54,7 @@ export async function analyze(target, { dir, ai = true, onProgress = () => {} } 
       truncated: fetchStats.truncated,
       downloadedBytes,
     },
-    ...publicReport,
+    ...results,
     ai: aiResult,
     aiError,
     aiEnabled: aiAvailable(),

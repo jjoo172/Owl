@@ -7,28 +7,22 @@ const SOURCE_BUDGET = Number(process.env.AI_SOURCE_BUDGET_CHARS || 150_000);
 const SYSTEM_PROMPT = `You are an expert C++ safety researcher, who is well-versed in common memory vulnerabilities and exploits. We want to use your expertise to scan a given github codebase, and identify all areas in the code that look to be risky (e.g. memory-unsafe code). Then, provide a general summary of the overall risk level of introducing this open source repository into your critical code path. Look only at the source code to determine risk level, ignoring text-based documents.
 
 You will receive:
-1. The output of a regex-based pattern scanner (rule hits, counts, hotspot files). These hits are candidates, not confirmed bugs, and the scanner is BLIND to most modern C++ memory-safety bugs.
-2. Line-numbered source code. When the repository is small enough you get every non-test source file in full; otherwise you get the highest-risk files in full plus short excerpts around other scanner hits.
+1. Summary output of a regex-based pattern scanner. Its hits are candidates, not confirmed bugs, and it is BLIND to most modern C++ memory-safety bugs.
+2. A list of individual scanner hits, each with an ID like S12.
+3. Line-numbered source code: every non-test source file in full when the repository is small enough, otherwise the highest-risk files in full plus short excerpts around other scanner hits.
 
 Review the source yourself, as a security auditor would. Do not limit yourself to what the scanner flagged — a clean scanner result says little. In particular look for:
-- Lifetime bugs: dangling references/pointers/string_views/spans, references to temporaries (including default arguments and members of temporaries in range-for), returning references to locals, lambdas capturing by reference that outlive their scope.
+- Lifetime bugs: dangling references/pointers/string_views/spans (including views into buffers that are later reused or freed), references to temporaries (including default arguments and members of temporaries in range-for), returning references to locals, lambdas capturing by reference that outlive their scope.
 - Invalidation: holding references, pointers or iterators into containers across push_back/insert/erase/rehash.
-- Undefined behaviour: signed integer overflow, oversized or negative shifts, misaligned access and strict-aliasing violations via reinterpret_cast/type punning, out-of-bounds indexing, unsigned wraparound in bounds checks (e.g. offset + size overflowing), comparators that are not strict weak orderings, use of moved-from objects, uninitialised reads.
+- Undefined behaviour: signed integer overflow, oversized or negative shifts, misaligned access and strict-aliasing violations via reinterpret_cast/type punning, out-of-bounds reads/writes, unsigned wraparound in bounds checks (e.g. offset + size overflowing), lengths never checked against the real buffer, comparators that are not strict weak orderings, use of moved-from objects, uninitialised reads.
 - Concurrency: data races on non-atomic state, unsynchronised containers, captured references shared across threads.
 - Classic C issues: unbounded copies, format strings, manual malloc/free, integer overflow in allocation sizes.
-Also judge scanner hits in context (e.g. a memcpy whose length is checked against the destination is fine).
 
-Be concrete: cite exact path:line locations from the numbered source and explain the failure mode. Never invent code you were not shown. If you only saw part of the repository, say how that limits your confidence.
-
-Respond with ONLY a JSON object, no prose before or after, matching:
-{
-  "overall_risk": "Low" | "Moderate" | "High" | "Critical",
-  "summary": "2-4 short paragraphs: what the code does at a glance, the dominant risk themes, and whether it is reasonable to put in a critical path",
-  "top_concerns": [ { "title": "...", "severity": "critical|high|medium|low", "detail": "why this is dangerous here", "locations": ["path:line", "..."] } ],
-  "likely_false_positives": ["short notes on scanner hits that look safe in context"],
-  "recommendations": ["concrete steps before adopting: sanitizers (ASan/UBSan/TSan), fuzzing, patches, sandboxing, alternatives"]
-}
-List at most 12 top_concerns, ordered by severity; group closely related lines into one concern.`;
+Report your results by calling the report_review tool exactly once:
+- findings: every distinct bug you are confident about, one entry per bug (not per theme), at the line where it occurs, ordered by severity. Cite only path:line locations from the numbered source you were shown — never invent code. When a finding corresponds to scanner hits, list their IDs in scanner_ids (this confirms them). If the scanner flagged the right line but at the wrong severity, give the severity you believe is right.
+- dismissed: scanner hits you have checked in context and believe are NOT a problem, with a short reason. Leave a hit out of both lists if you could not judge it.
+- Severity: critical = likely exploitable memory corruption; high = memory-unsafe or UB that can corrupt/leak memory or crash; medium = UB or misuse that is dangerous under plausible conditions; low = hardening issue or fragile code.
+If you only saw part of the repository, say how that limits your confidence in the summary.`;
 
 // Signals that a file is likely to hide lifetime / UB bugs the scanner can't see.
 const SUBTLE_RISK_SIGNALS =
@@ -102,10 +96,65 @@ export function aiAvailable() {
   return Boolean(process.env.ANTHROPIC_API_KEY);
 }
 
+/** Scanner hits Claude is asked to confirm or dismiss, each with a short ID. */
+function reviewableHits(allFindings, fullSet, max = 200) {
+  const sevRank = Object.fromEntries(SEVERITY_ORDER.map((s, i) => [s, i]));
+  return allFindings
+    .filter((f) => f.kind !== 'test' && (f.severity !== 'low' || fullSet.has(f.file)))
+    .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || a.file.localeCompare(b.file) || a.line - b.line)
+    .slice(0, max)
+    .map((f, i) => ({ id: `S${i + 1}`, finding: f }));
+}
+
+const SEVERITY_ENUM = ['critical', 'high', 'medium', 'low'];
+const REVIEW_TOOL = {
+  name: 'report_review',
+  description: 'Report the security review of this repository.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      overall_risk: { type: 'string', enum: ['Low', 'Moderate', 'High', 'Critical'] },
+      summary: { type: 'string', description: '2-4 short paragraphs: what the code does, dominant risk themes, and whether it is reasonable for a critical path.' },
+      findings: {
+        type: 'array',
+        maxItems: 40,
+        items: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Short name of the bug, e.g. "Dangling string_view into reused line buffer".' },
+            severity: { type: 'string', enum: SEVERITY_ENUM },
+            category: { type: 'string', description: 'e.g. Use-after-free, Dangling reference, Out-of-bounds read, Signed integer overflow, Data race, Strict aliasing.' },
+            cwe: { type: 'string', description: 'e.g. CWE-416. Optional.' },
+            file: { type: 'string', description: 'Path exactly as shown in the source headers.' },
+            line: { type: 'integer', minimum: 1 },
+            detail: { type: 'string', description: 'Why this is a bug and how it fails, 1-3 sentences.' },
+            scanner_ids: { type: 'array', items: { type: 'string' }, description: 'IDs of scanner hits this finding confirms, if any.' },
+          },
+          required: ['title', 'severity', 'category', 'file', 'line', 'detail'],
+        },
+      },
+      dismissed: {
+        type: 'array',
+        maxItems: 100,
+        items: {
+          type: 'object',
+          properties: { scanner_id: { type: 'string' }, reason: { type: 'string' } },
+          required: ['scanner_id', 'reason'],
+        },
+      },
+      recommendations: { type: 'array', items: { type: 'string' }, maxItems: 8 },
+    },
+    required: ['overall_risk', 'summary', 'findings', 'dismissed', 'recommendations'],
+  },
+};
+
+export const DEFAULT_MODEL = 'claude-haiku-5-5';
+
 export function buildReviewRequest({ repo, report, allFindings, contentByPath }) {
   const selection = selectSourceForReview(contentByPath, report.hotspots);
   const fullSet = new Set(selection.files);
   const sample = sampleFindings(allFindings, fullSet);
+  const hits = reviewableHits(allFindings, fullSet);
 
   const fullSource = selection.files
     .map((p) => {
@@ -124,6 +173,8 @@ export function buildReviewRequest({ repo, report, allFindings, contentByPath })
     })
     .join('\n\n');
 
+  const hitList = hits.map(({ id, finding: f }) => `${id} [${f.severity}] ${f.ruleId} ${f.file}:${f.line} | ${f.code.slice(0, 140)}`).join('\n');
+
   const input = {
     repository: `${repo.owner}/${repo.repo}${repo.ref ? '@' + repo.ref : ''}`,
     source_coverage:
@@ -133,23 +184,23 @@ export function buildReviewRequest({ repo, report, allFindings, contentByPath })
     stats: report.stats,
     scanner_risk_estimate: report.risk,
     rule_hits: report.ruleSummary.map(({ ruleId, title, severity, cwe, count, productionCount, files }) => ({ ruleId, title, severity, cwe, count, productionCount, files })),
-    hotspot_files: report.hotspots.slice(0, 10),
     modern_cpp_signals: report.mitigations,
   };
 
   const userContent = [
-    `Scanner output (JSON):\n${JSON.stringify(input, null, 1)}`,
+    `Scanner summary (JSON):\n${JSON.stringify(input, null, 1)}`,
+    hitList ? `Individual scanner hits to confirm or dismiss (${hits.length}${hits.length >= 200 ? ', most severe first; others omitted' : ''}):\n${hitList}` : 'The scanner flagged no individual hits for review.',
     fullSource ? `Full source files (line-numbered):\n\n${fullSource}` : '',
     excerpts ? `Excerpts around scanner hits in other files (">" marks the flagged line):\n\n${excerpts}` : '',
   ]
     .filter(Boolean)
     .join('\n\n');
 
-  return { userContent, selection, excerptCount: sample.length };
+  return { userContent, selection, excerptCount: sample.length, hits };
 }
 
 export async function aiReview(args) {
-  const { userContent, selection, excerptCount } = buildReviewRequest(args);
+  const { userContent, selection, excerptCount, hits } = buildReviewRequest(args);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000);
@@ -163,27 +214,28 @@ export async function aiReview(args) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5',
-        max_tokens: 6000,
+        model: process.env.ANTHROPIC_MODEL || DEFAULT_MODEL,
+        max_tokens: Number(process.env.AI_MAX_OUTPUT_TOKENS || 8000),
         system: SYSTEM_PROMPT,
+        tools: [REVIEW_TOOL],
+        tool_choice: { type: 'tool', name: REVIEW_TOOL.name },
         messages: [{ role: 'user', content: userContent }],
       }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error?.message || `Anthropic API returned ${res.status}`);
-    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start < 0 || end < start) throw new Error('Claude did not return a JSON review.');
-    const parsed = JSON.parse(text.slice(start, end + 1));
+    const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === REVIEW_TOOL.name);
+    if (!call?.input) {
+      throw new Error(data.stop_reason === 'max_tokens' ? 'Claude\'s review was cut off (output limit reached).' : 'Claude did not return a structured review.');
+    }
+    if (data.stop_reason === 'max_tokens') throw new Error('Claude\'s review was cut off (output limit reached); try raising AI_MAX_OUTPUT_TOKENS.');
     return {
-      ...parsed,
-      model: data.model,
-      coverage: {
-        mode: selection.mode,
-        filesInFull: selection.files.length,
-        totalFiles: selection.totalFiles,
-        excerpts: excerptCount,
+      review: call.input,
+      hits,
+      meta: {
+        model: data.model,
+        usage: data.usage,
+        coverage: { mode: selection.mode, filesInFull: selection.files.length, totalFiles: selection.totalFiles, excerpts: excerptCount, scannerHitsReviewed: hits.length },
       },
     };
   } finally {

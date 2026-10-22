@@ -230,7 +230,7 @@ function render(data) {
         <div class="stats">
           <div class="stat"><b>${fmt(stats.sourceFiles)}</b><span>C/C++ source files</span></div>
           <div class="stat"><b>${fmt(stats.loc)}</b><span>lines of code</span></div>
-          <div class="stat"><b>${fmt(stats.totalFindings)}</b><span>pattern hits</span></div>
+          <div class="stat"><b>${fmt(stats.totalFindings)}</b><span>${ai ? 'findings (scanner + Claude)' : 'pattern hits'}</span></div>
           <div class="stat"><b>${risk.density}</b><span>weighted hits / KLOC</span></div>
           <div class="stat"><b>${fmt(data.archive.ignoredNonSourceFiles)}</b><span>non-source files ignored</span></div>
         </div>
@@ -238,6 +238,7 @@ function render(data) {
           ${SEVERITIES.map((s) => `<div style="width:${(100 * (stats.bySeverity[s] || 0)) / sevTotal}%;background:${SEV_COLOR[s]}" title="${s}: ${stats.bySeverity[s] || 0}"></div>`).join('')}
         </div>
         <div class="sub">${SEVERITIES.map((s) => `<span style="white-space:nowrap"><span class="sev sev-${s}">${s}</span> ${fmt(stats.bySeverity[s] || 0)}</span>`).join(" &nbsp; ")}</div>
+        ${stats.bySource ? `<div class="sub" style="margin-top:6px">Claude added <b>${fmt(stats.bySource.addedByClaude)}</b> finding${stats.bySource.addedByClaude === 1 ? '' : 's'} the scanner can't see, confirmed <b>${fmt(stats.bySource.confirmedByClaude)}</b> scanner hit${stats.bySource.confirmedByClaude === 1 ? '' : 's'} and dismissed <b>${fmt(stats.bySource.dismissedByClaude)}</b>.</div>` : ''}
       </div>
     </section>
 
@@ -263,13 +264,14 @@ function render(data) {
 
     <section class="card">
       <h2>What was found</h2>
-      <p class="sub">Click a row to filter the findings below.</p>
+      <p class="sub">Click a row to filter the findings below.${ai ? ' Rows marked <span class="pill claude">Claude</span> were found by reading the code; the rest are scanner patterns.' : ''}</p>
       <div class="table-scroll"><table>
-        <thead><tr><th>Severity</th><th>Pattern</th><th class="hide-sm">CWE</th><th class="num">Non-test</th><th class="num">Total</th><th class="num hide-sm">Files</th></tr></thead>
+        <thead><tr><th>Severity</th><th>Issue</th><th class="hide-sm">CWE</th><th class="num">Non-test</th><th class="num">Total</th><th class="num hide-sm">Files</th></tr></thead>
         <tbody>${data.ruleSummary.map((r) => `<tr class="rule" data-rule="${esc(r.ruleId)}" title="${esc(r.description)}">
           <td><span class="sev sev-${r.severity}">${r.severity}</span></td>
-          <td><b>${esc(r.title)}</b><div class="sub">${esc(r.description)}</div></td>
-          <td class="hide-sm mono"><a href="https://cwe.mitre.org/data/definitions/${esc(r.cwe.replace('CWE-', ''))}.html" target="_blank" rel="noopener">${esc(r.cwe)}</a></td>
+          <td><b>${esc(r.title)}</b> ${r.source === 'claude' ? '<span class="pill claude">Claude</span>' : ''}
+            <div class="sub">${esc(r.description)}${r.confirmed ? ` · ${fmt(r.confirmed)} confirmed by Claude` : ''}${r.dismissed ? ` · ${fmt(r.dismissed)} dismissed by Claude` : ''}</div></td>
+          <td class="hide-sm mono">${/^CWE-\d+$/.test(r.cwe || '') ? `<a href="https://cwe.mitre.org/data/definitions/${esc(r.cwe.replace('CWE-', ''))}.html" target="_blank" rel="noopener">${esc(r.cwe)}</a>` : esc(r.cwe || '')}</td>
           <td class="num">${fmt(r.productionCount)}</td><td class="num">${fmt(r.count)}</td><td class="num hide-sm">${fmt(r.files)}</td>
         </tr>`).join('') || '<tr><td colspan="6" class="sub">Nothing flagged.</td></tr>'}</tbody>
       </table></div>
@@ -280,11 +282,19 @@ function render(data) {
       <div class="filters">
         ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" ${s === 'low' && data.findings.some((f) => f.severity !== 'low') ? '' : 'checked'}> <span class="sev sev-${s}">${s}</span></label>`).join('')}
         <label><input type="checkbox" id="f-tests"> include test / example code</label>
+        ${ai ? `<select id="f-source">
+          <option value="">All sources</option>
+          <option value="claude">Found by Claude</option>
+          <option value="confirmed">Confirmed by Claude</option>
+          <option value="scanner">Scanner only (not reviewed)</option>
+          <option value="dismissed">Dismissed by Claude</option>
+        </select>
+        <label><input type="checkbox" id="f-dismissed"> show dismissed</label>` : ''}
         <select id="f-rule"><option value="">All patterns</option>${data.ruleSummary.map((r) => `<option value="${esc(r.ruleId)}">${esc(r.title)}</option>`).join('')}</select>
         <input type="search" id="f-text" placeholder="Filter by path or code…">
       </div>
       <div id="findings-list"></div>
-      ${stats.findingsTruncated ? `<p class="sub">Showing the first ${fmt(data.findings.length)} of ${fmt(stats.totalFindings)} hits (most severe first).</p>` : ''}
+      ${stats.findingsTruncated ? `<p class="sub">Showing the first ${fmt(data.findings.length)} findings (most severe first).</p>` : ''}
     </section>
 
     <section class="actions">
@@ -337,7 +347,12 @@ function renderAi(data) {
       ${concerns ? `<h3>Top concerns</h3>${concerns}` : ''}
       <div class="two-col" style="margin-top:6px">
         ${(ai.recommendations || []).length ? `<div><h3>Before adopting</h3><ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></div>` : ''}
-        ${(ai.likely_false_positives || []).length ? `<div><h3>Likely false positives</h3><ul class="plain">${ai.likely_false_positives.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></div>` : ''}
+        ${ai.counts ? `<div><h3>How Claude changed the results</h3><ul class="plain">
+          <li>${fmt(ai.counts.added)} new finding${ai.counts.added === 1 ? '' : 's'} the scanner can't detect</li>
+          <li>${fmt(ai.counts.confirmed)} scanner hit${ai.counts.confirmed === 1 ? '' : 's'} confirmed (severity set by Claude)</li>
+          <li>${fmt(ai.counts.dismissed)} scanner hit${ai.counts.dismissed === 1 ? '' : 's'} dismissed as safe in context</li>
+          ${ai.counts.unverifiedLocations ? `<li>${fmt(ai.counts.unverifiedLocations)} cited a location that doesn't exist — shown, but not counted</li>` : ''}
+        </ul></div>` : ''}
       </div>
       <p class="sub">${
         ai.coverage
@@ -373,6 +388,9 @@ function wireFindings(data) {
   const apply = () => {
     const sevs = new Set([...document.querySelectorAll('[data-sev]')].filter((c) => c.checked).map((c) => c.dataset.sev));
     const tests = $('#f-tests').checked;
+    const source = $('#f-source')?.value || '';
+    const showDismissed = $('#f-dismissed')?.checked || source === 'dismissed';
+    const sourceOf = (f) => (f.source === 'claude' ? 'claude' : f.verdict || 'scanner');
     const rule = $('#f-rule').value;
     const text = $('#f-text').value.trim().toLowerCase();
     const titles = Object.fromEntries(data.ruleSummary.map((r) => [r.ruleId, r.title]));
@@ -381,23 +399,31 @@ function wireFindings(data) {
         sevs.has(f.severity) &&
         (tests || f.kind !== 'test') &&
         (!rule || f.ruleId === rule) &&
-        (!text || f.file.toLowerCase().includes(text) || f.code.toLowerCase().includes(text)),
+        (showDismissed || f.verdict !== 'dismissed') &&
+        (!source || sourceOf(f) === source) &&
+        (!text || `${f.file} ${f.code} ${f.ai?.title || ''} ${f.ai?.detail || ''}`.toLowerCase().includes(text)),
     );
     list.innerHTML =
       (items.length ? '' : '<p class="sub">No findings match these filters.</p>') +
       items
         .slice(0, shown)
         .map(
-          (f) => `<div class="finding">
+          (f) => `<div class="finding${f.verdict === 'dismissed' ? ' dismissed' : ''}">
           <div class="head"><span class="sev sev-${f.severity}">${f.severity}</span>
-            <span class="loc">${locLink(data, f.file, f.line)}</span>
-            <span class="pill">${esc(titles[f.ruleId] || f.ruleId)}</span>
+            <span class="loc">${f.locationVerified === false ? `<code>${esc(f.file)}:${f.line}</code>` : locLink(data, f.file, f.line)}</span>
+            <span class="pill">${esc(titles[f.ruleId] || f.ai?.category || f.ruleId)}</span>
+            ${f.source === 'claude' ? '<span class="pill claude">Found by Claude</span>' : ''}
+            ${f.verdict === 'confirmed' ? '<span class="pill claude">Confirmed by Claude</span>' : ''}
+            ${f.verdict === 'dismissed' ? '<span class="pill">Dismissed by Claude</span>' : ''}
+            ${f.locationVerified === false ? '<span class="pill warn">Location not found in source</span>' : ''}
+            ${f.scannerSeverity && f.scannerSeverity !== f.severity ? `<span class="pill">scanner said ${esc(f.scannerSeverity)}</span>` : ''}
             ${f.kind !== 'production' ? `<span class="pill">${esc(f.kind)}</span>` : ''}</div>
-          <pre>${
+          ${f.ai ? `<div class="ai-note">${f.verdict === 'dismissed' ? '' : `<b>${esc(f.ai.title)}.</b> `}${esc(f.ai.detail)}</div>` : ''}
+          ${!f.context && !f.code ? '' : `<pre>${
             f.context
               ? f.context.map((l) => `<span class="${l.n === f.line ? 'hl' : ''}"><span class="ln">${l.n}</span>${esc(l.text)}</span>`).join('')
               : `<span class="hl"><span class="ln">${f.line}</span>${esc(f.code)}</span>`
-          }</pre>
+          }</pre>`}
         </div>`,
         )
         .join('') +
@@ -406,7 +432,7 @@ function wireFindings(data) {
     if (more) more.onclick = () => ((shown += PAGE), apply());
   };
 
-  document.querySelectorAll('#findings-card [data-sev], #f-tests, #f-rule').forEach((el) => el.addEventListener('change', () => ((shown = PAGE), apply())));
+  document.querySelectorAll('#findings-card [data-sev], #f-tests, #f-rule, #f-source, #f-dismissed').forEach((el) => el.addEventListener('change', () => ((shown = PAGE), apply())));
   $('#f-text').addEventListener('input', () => ((shown = PAGE), apply()));
   apply();
 }

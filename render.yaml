@@ -10,6 +10,7 @@ services:
       - key: NODE_VERSION
         value: "22"
       # Enables the expert review step (Claude). Leave empty to run pattern scanning only.
+      # Model defaults to claude-haiku-5-5; set ANTHROPIC_MODEL to override.
       - key: ANTHROPIC_API_KEY
         sync: false
       # Optional: raises GitHub's download rate limit from 60/hour to 5,000/hour.

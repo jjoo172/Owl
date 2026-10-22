@@ -38,9 +38,15 @@ enabled. Step 2 only starts if nothing failed.
 4. **Expert review (optional)** — if `ANTHROPIC_API_KEY` is set, Claude (prompted as an expert
    C++ safety researcher) reads the source itself: every non-test file when the repo fits in
    ~150k characters, otherwise the highest-risk files in full plus excerpts around other hits.
-   It looks for the bugs patterns can't see — dangling references, invalidated iterators,
-   undefined behaviour, data races — judges the scanner hits in context, and writes the overall
-   risk summary, top concerns and recommendations.
+   It returns a structured review (via a forced tool call) that Owl merges into the results:
+   - **new findings** for bugs the patterns can't see (dangling references, invalidated
+     iterators, undefined behaviour, data races…), each with file, line, severity and reason;
+   - **confirmations** of scanner hits, with the severity Claude judges correct;
+   - **dismissals** of scanner hits that are safe in context (kept visible, not counted).
+
+   Severity counts, the issue table, hotspots and the findings list all reflect the merged
+   result; every finding is labelled as scanner-only, found by Claude, confirmed or dismissed.
+   Findings citing a file or line that doesn't exist are shown with a warning and never counted.
 
 Pattern matching finds *candidates*, not confirmed bugs — treat findings as a review checklist.
 
@@ -75,6 +81,14 @@ Each scan makes three GitHub API calls (repo, commit, languages); without `GITHU
 GitHub allows 60 per hour, so about 20 scans an hour. The archive download itself is not
 rate-limited.
 
-Other optional settings: `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `AI_SOURCE_BUDGET_CHARS`
-(default 150000), `MAX_TARBALL_MB`
+### Cost
+
+The expert review defaults to **Claude Haiku 5.5** — under a cent per scan at Owl's prompt sizes
+(well below the 100k-token threshold where Haiku pricing rises). For deeper reviews of subtle
+lifetime/UB bugs, set `ANTHROPIC_MODEL=claude-sonnet-5-5` (roughly $0.04–0.15 per scan).
+A Claude Max plan includes monthly API credits that can fund this; link them to the Console
+organization that owns the key. Results are cached per commit for 30 minutes.
+
+Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `AI_SOURCE_BUDGET_CHARS`
+(default 150000), `AI_MAX_OUTPUT_TOKENS` (default 8000), `MAX_TARBALL_MB`
 (default 300), `MAX_SOURCE_FILES` (default 25000), `MAX_CONCURRENT_SCANS` (default 2).
