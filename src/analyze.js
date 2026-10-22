@@ -3,13 +3,14 @@ import { fetchSourceFiles, readLocalSourceFiles, UserError } from './github.js';
 import { scanRepository } from './scanner.js';
 import { aiAvailable, aiReview } from './ai.js';
 import { mergeReview } from './merge.js';
+import { BudgetExceededError } from './budget.js';
 
 /**
  * Step 2: download the confirmed commit → scan source → (optional) expert review.
  * `target` is { owner, repo, ref, sha } from the access check (step 1).
  * Pass `dir` instead to scan a local checkout.
  */
-export async function analyze(target, { dir, ai = true, onProgress = () => {} } = {}) {
+export async function analyze(target, { dir, ai = true, budget, onProgress = () => {} } = {}) {
   const repo = dir ? { owner: 'local', repo: basename(resolve(dir)), ref: undefined, sha: null } : target;
   if (!dir && !repo?.sha) throw new UserError('Run the access check before scanning.', 400);
   const started = Date.now();
@@ -27,12 +28,13 @@ export async function analyze(target, { dir, ai = true, onProgress = () => {} } 
   if (ai && aiAvailable() && files.length) {
     onProgress('Expert review with Claude');
     try {
-      const review = await aiReview({ repo, report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath });
+      const review = await aiReview({ budget, repo, report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath });
       const merged = mergeReview({ report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath, ai: review });
       aiResult = merged.ai;
       results = { ...publicReport, stats: merged.stats, ruleSummary: merged.ruleSummary, hotspots: merged.hotspots, findings: merged.findings };
     } catch (err) {
-      aiError = err.name === 'AbortError' ? 'AI review timed out.' : `AI review failed: ${err.message}`;
+      aiError =
+        err instanceof BudgetExceededError ? err.message : err.name === 'AbortError' ? 'AI review timed out.' : `AI review failed: ${err.message}`;
     }
   }
 

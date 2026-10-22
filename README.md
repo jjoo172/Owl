@@ -89,6 +89,15 @@ lifetime/UB bugs, set `ANTHROPIC_MODEL=claude-sonnet-5-5` (roughly $0.04–0.15 
 A Claude Max plan includes monthly API credits that can fund this; link them to the Console
 organization that owns the key. Results are cached per commit for 30 minutes.
 
+**Spending limits.** Each visitor (identified by IP) can spend at most **$10/day** of Claude
+review (`AI_USER_DAILY_BUDGET_USD`); set `AI_DAILY_BUDGET_USD` for an optional site-wide cap.
+Before each review Owl reserves its worst-case cost, then settles it with the real cost from the
+API's token counts, so simultaneous scans can't overshoot. Over the limit, scans still run without
+the review, and step 1 shows each visitor's remaining budget. Limits reset at midnight UTC. They
+are kept in memory, so they also reset when the service restarts or sleeps, and IP identity is
+best-effort (edge headers first; override with `CLIENT_IP_HEADER`). Keep a spend limit on the API
+key's Console workspace as the hard backstop.
+
 Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `AI_SOURCE_BUDGET_CHARS`
 (default 150000), `AI_MAX_OUTPUT_TOKENS` (default 8000), `MAX_TARBALL_MB`
 (default 300), `MAX_SOURCE_FILES` (default 25000), `MAX_CONCURRENT_SCANS` (default 2).

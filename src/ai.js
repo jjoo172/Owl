@@ -1,5 +1,6 @@
 import { contextFor, classifyPath } from './scanner.js';
 import { SEVERITY_ORDER } from './rules.js';
+import { costUsd } from './budget.js';
 
 // How much source (in characters) Claude may read in full. ~150k chars ≈ 40k tokens.
 const SOURCE_BUDGET = Number(process.env.AI_SOURCE_BUDGET_CHARS || 150_000);
@@ -199,8 +200,24 @@ export function buildReviewRequest({ repo, report, allFindings, contentByPath })
   return { userContent, selection, excerptCount: sample.length, hits };
 }
 
-export async function aiReview(args) {
+/** Worst-case cost of a review call: conservative input estimate + the full output allowance. */
+export function estimateReviewCost(model, userContent, maxTokens) {
+  const inputTokens = Math.ceil((SYSTEM_PROMPT.length + JSON.stringify(REVIEW_TOOL).length + userContent.length) / 3);
+  return costUsd(model, inputTokens, maxTokens);
+}
+
+/**
+ * Runs the review. `budget` ({ ledger, clientId }) is optional: when given, the call's
+ * worst-case cost is reserved first (throwing BudgetExceededError if over a limit) and then
+ * settled with the real cost from the API's reported token usage.
+ */
+export async function aiReview({ budget, ...args }) {
   const { userContent, selection, excerptCount, hits } = buildReviewRequest(args);
+  const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+  const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 8000);
+
+  const reservation = budget ? budget.ledger.reserve(budget.clientId, estimateReviewCost(model, userContent, maxTokens)) : null;
+  let actualCost = null; // null = unknown (e.g. timed out after sending): keep the reservation
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000);
@@ -214,8 +231,8 @@ export async function aiReview(args) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || DEFAULT_MODEL,
-        max_tokens: Number(process.env.AI_MAX_OUTPUT_TOKENS || 8000),
+        model,
+        max_tokens: maxTokens,
         system: SYSTEM_PROMPT,
         tools: [REVIEW_TOOL],
         tool_choice: { type: 'tool', name: REVIEW_TOOL.name },
@@ -223,6 +240,8 @@ export async function aiReview(args) {
       }),
     });
     const data = await res.json().catch(() => ({}));
+    if (data.usage) actualCost = costUsd(data.model || model, data.usage.input_tokens || 0, data.usage.output_tokens || 0);
+    else if (!res.ok) actualCost = 0; // rejected requests aren't billed
     if (!res.ok) throw new Error(data?.error?.message || `Anthropic API returned ${res.status}`);
     const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === REVIEW_TOOL.name);
     if (!call?.input) {
@@ -235,10 +254,12 @@ export async function aiReview(args) {
       meta: {
         model: data.model,
         usage: data.usage,
+        costUsd: actualCost,
         coverage: { mode: selection.mode, filesInFull: selection.files.length, totalFiles: selection.totalFiles, excerpts: excerptCount, scannerHitsReviewed: hits.length },
       },
     };
   } finally {
     clearTimeout(timer);
+    if (reservation !== null && actualCost !== null) budget.ledger.settle(reservation, actualCost);
   }
 }

@@ -360,7 +360,7 @@ function renderAi(data) {
             ? `Claude read all ${fmt(ai.coverage.totalFiles)} non-test source files in full`
             : `Claude read ${fmt(ai.coverage.filesInFull)} of ${fmt(ai.coverage.totalFiles)} non-test source files in full (highest-risk first)${ai.coverage.excerpts ? ` plus ${fmt(ai.coverage.excerpts)} excerpts` : ''}`
           : ''
-      } · ${esc(ai.model || '')}</p>
+      } · ${esc(ai.model || '')}${typeof ai.costUsd === 'number' ? ` · cost $${ai.costUsd < 0.01 ? ai.costUsd.toFixed(4) : ai.costUsd.toFixed(2)}` : ''}</p>
     </section>`;
   }
   if (data.aiError) return `<section class="card"><h2>Expert review</h2><p class="sub">${esc(data.aiError)} The pattern-based results below are still complete.</p></section>`;

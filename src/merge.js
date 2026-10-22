@@ -201,6 +201,7 @@ export function mergeReview({ report, allFindings, contentByPath, ai, maxFinding
       counts: { findings: (review.findings || []).length, added: added.length, confirmed, dismissed, unverifiedLocations: unverified },
       model: meta.model,
       usage: meta.usage,
+      costUsd: meta.costUsd,
       coverage: meta.coverage,
     },
   };

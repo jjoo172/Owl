@@ -13,6 +13,11 @@ services:
       # Model defaults to claude-haiku-5-5; set ANTHROPIC_MODEL to override.
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Optional: per-visitor daily Claude spend in USD (default 10) and an optional site-wide cap.
+      - key: AI_USER_DAILY_BUDGET_USD
+        value: "10"
+      - key: AI_DAILY_BUDGET_USD
+        sync: false
       # Optional: raises GitHub's download rate limit from 60/hour to 5,000/hour.
       - key: GITHUB_TOKEN
         sync: false

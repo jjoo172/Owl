@@ -5,6 +5,7 @@ import { dirname, join, normalize, extname } from 'node:path';
 import { analyze } from './analyze.js';
 import { aiAvailable } from './ai.js';
 import { checkRepository } from './access.js';
+import { DailyBudget, clientIdOf, fmtUsd } from './budget.js';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PORT = process.env.PORT || 3000;
@@ -20,6 +21,7 @@ const TYPES = {
 };
 
 let active = 0;
+const ledger = new DailyBudget();
 const cache = new Map(); // key -> { at, data }
 
 async function readJson(req, limit = 10_000) {
@@ -87,8 +89,10 @@ async function handleScan(req, res) {
   active++;
   const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
   try {
-    const data = await analyze(target, { ai: useAi, onProgress: (message) => send({ type: 'progress', message }) });
-    cache.set(key, { at: Date.now(), data });
+    const budget = { ledger, clientId: clientIdOf(req) };
+    const data = await analyze(target, { ai: useAi, budget, onProgress: (message) => send({ type: 'progress', message }) });
+    // Only cache complete results: a review skipped for one visitor's budget mustn't be served to others.
+    if (!data.aiError) cache.set(key, { at: Date.now(), data });
     if (cache.size > 50) cache.delete(cache.keys().next().value);
     send({ type: 'result', data });
   } catch (err) {
@@ -124,7 +128,22 @@ async function handleCheck(req, res) {
     }
   }
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(result));
+  res.end(JSON.stringify(withBudget(result, clientIdOf(req))));
+}
+
+/** Adds this visitor's remaining Claude budget to the expert-review check (per request, not cached). */
+function withBudget(result, clientId) {
+  if (!aiAvailable() || !result.checks) return result;
+  const left = ledger.remaining(clientId);
+  const limit = ledger.perUserUsd;
+  const checks = result.checks.map((c) => {
+    if (c.id !== 'ai') return c;
+    if (left <= 0) {
+      return { ...c, status: 'warn', detail: "Today's Claude review budget is used up (resets at midnight UTC) — the pattern scan still runs." };
+    }
+    return { ...c, detail: limit === null ? 'Enabled' : `Enabled — $${fmtUsd(left)} of your $${fmtUsd(limit)} daily budget left` };
+  });
+  return { ...result, checks };
 }
 
 const server = createServer((req, res) => {
