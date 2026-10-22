@@ -312,7 +312,6 @@ function render(data) {
 
     ${cov.notReviewed.length ? fold('notreviewed-card', 'Not reviewed', `${fmt(cov.notReviewed.length)} file${cov.notReviewed.length === 1 ? '' : 's'}`, renderNotReviewed(data, cov)) : ''}
 
-    ${full ? '' : fold('signals-card', 'Safer-idiom signals', `${fmt(Object.keys(data.mitigations || {}).length)} found`, renderMitigations(data, false))}
 
     <section class="actions">
       <button id="dl-json" type="button">Download full report (JSON)</button>
@@ -411,20 +410,6 @@ function renderConcerns(data) {
       <div>${esc(c.detail)}</div>
       ${(c.locations || []).length ? `<div class="locs">${c.locations.map((l) => locFromString(data, l)).join('')}</div>` : ''}
     </div>`).join('');
-}
-
-function renderMitigations(data, heading = true) {
-  const labels = {
-    'smart-pointers': 'Smart pointers',
-    'safe-views': 'span / string_view',
-    containers: 'Standard containers',
-    'checked-access': 'Checked .at() access',
-    'fuzz-harness': 'Fuzz harnesses',
-  };
-  const entries = Object.entries(data.mitigations || {});
-  const h = heading ? '<h3>Safer-idiom signals</h3>' : '';
-  if (!entries.length) return `${h}<p class="sub">None detected.</p>`;
-  return `${h}<ul class="plain">${entries.map(([k, v]) => `<li>${esc(labels[k] || k)}: ${fmt(v)}</li>`).join('')}</ul>`;
 }
 
 function wireFindings(data) {
