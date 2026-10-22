@@ -19,8 +19,8 @@ writeFileSync(join(dir, 'src/a.c'), 'void f(char*d,const char*s){ strcpy(d,s); }
 
 const ok = () =>
   new Response(JSON.stringify({
-    model: 'claude-haiku-5-5', stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 50 },
-    content: [{ type: 'tool_use', name: 'report_review', input: { overall_risk: 'High', summary: 's', findings: [{ title: 'Unbounded copy', severity: 'high', category: 'Buffer overflow', file: 'src/a.c', line: 1, detail: 'd' }], recommendations: [] } }],
+    model: 'claude-haiku-5-5', stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 },
+    content: [{ type: 'text', text: JSON.stringify({ overall_risk: 'High', summary: 's', findings: [{ title: 'Unbounded copy', severity: 'high', category: 'Buffer overflow', cwe: '', file: 'src/a.c', line: 1, detail: 'd' }], recommendations: [] }) }],
   }));
 const err = (status, message = 'x') => new Response(JSON.stringify({ error: { message } }), { status });
 
@@ -75,7 +75,7 @@ test('no key configured is a basic scan, not an error', async () => {
 test('malformed but recoverable reviews are accepted; unusable ones are retried, then fall back', async () => {
   process.env.ANTHROPIC_API_KEY = 'x';
   const reply = (input) => () =>
-    new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 10 }, content: [{ type: 'tool_use', name: 'report_review', input }] }));
+    new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 10 }, content: [{ type: 'text', text: JSON.stringify(input) }] }));
   const one = { title: 'Unbounded copy', severity: 'high', category: 'Buffer overflow', detail: 'd' };
 
   // findings sent as a JSON string, with path/line_number field names
@@ -113,4 +113,54 @@ test('malformed but recoverable reviews are accepted; unusable ones are retried,
   assert.equal(r.tier, 'full');
   assert.equal(r.findings.length, 0);
   assert.equal(calls(), 1);
+});
+
+test('the request uses API-enforced structured output with a schema the API accepts', async () => {
+  process.env.ANTHROPIC_API_KEY = 'x';
+  let sent;
+  globalThis.fetch = async (_url, opts) => {
+    sent = JSON.parse(opts.body);
+    return ok();
+  };
+  await analyze(null, { dir });
+  assert.equal(sent.tools, undefined);
+  assert.equal(sent.output_config.format.type, 'json_schema');
+  const schema = sent.output_config.format.schema;
+  assert.deepEqual(Object.keys(schema.properties).slice(0, 1), ['findings'], 'vulnerabilities come first');
+  // Structured outputs: every object closed, no unsupported constraints.
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'object') {
+      assert.equal(node.additionalProperties, false);
+      assert.deepEqual([...node.required].sort(), Object.keys(node.properties).sort(), 'all fields required');
+    }
+    for (const bad of ['maxItems', 'minimum', 'maximum', 'minLength', 'maxLength']) assert.equal(node[bad], undefined, bad);
+    Object.values(node).forEach(walk);
+  };
+  walk(schema);
+});
+
+test('each unusable outcome gets its own plain-language reason', async () => {
+  process.env.ANTHROPIC_API_KEY = 'x';
+  const reply = (extra) => () => new Response(JSON.stringify({ model: 'claude-haiku-5-5', usage: { input_tokens: 1, output_tokens: 1 }, ...extra }));
+  const cases = [
+    [{ stop_reason: 'refusal', content: [{ type: 'text', text: '' }] }, /declined to review/],
+    [{ stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"findings":[' }] }, /cut off/],
+    [{ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ findings: [], overall_risk: 'high', summary: 's', recommendations: [] }) }] }, /rated the code High but listed no specific vulnerabilities/],
+    [{ stop_reason: 'end_turn', content: [{ type: 'text', text: 'not json' }] }, /form Owl couldn't use/],
+  ];
+  for (const [extra, reason] of cases) {
+    claude(reply(extra));
+    const r = await analyze(null, { dir });
+    assert.equal(r.tier, 'basic');
+    assert.match(r.tierReason, reason);
+  }
+});
+
+test('an empty findings field does not hide vulnerabilities listed under another name', async () => {
+  process.env.ANTHROPIC_API_KEY = 'x';
+  const { normalizeReview } = await import('../src/ai.js');
+  const { review } = normalizeReview({ findings: [], vulnerabilities: [{ title: 't', severity: 'high', category: 'c', file: 'src/a.c', line: 1, detail: 'd' }], overall_risk: 'HIGH', summary: 's', recommendations: [] });
+  assert.equal(review.findings.length, 1);
+  assert.equal(review.overall_risk, 'High', 'rating casing normalized');
 });

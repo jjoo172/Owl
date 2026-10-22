@@ -16,7 +16,7 @@ Review it as a security auditor would, file by file. Look for every vulnerabilit
 - Concurrency: data races on non-atomic state, unsynchronised containers, captured references shared across threads.
 - Classic C issues: unbounded copies (strcpy, sprintf, gets), format strings, manual malloc/free mistakes, integer overflow in allocation sizes, command injection.
 
-Report your results by calling the report_review tool exactly once:
+Report your results as a single JSON object in the required format, listing the findings first:
 - findings: every distinct vulnerability you are confident about, one entry per bug (not per theme), at the line where it occurs, ordered by severity. Cite only path:line locations from the numbered source you were shown — never invent code. Include low-severity issues too.
 - Severity: critical = likely exploitable memory corruption; high = memory-unsafe or UB that can corrupt/leak memory or crash; medium = UB or misuse that is dangerous under plausible conditions; low = hardening issue or fragile code.
 - overall_risk reflects the risk of putting this code in a critical path. If you only saw part of the repository, say how that limits your confidence in the summary.`;
@@ -72,35 +72,38 @@ export function aiAvailable() {
 }
 
 const SEVERITY_ENUM = ['critical', 'high', 'medium', 'low'];
-const REVIEW_TOOL = {
-  name: 'report_review',
-  description: 'Report the security review of this repository.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      overall_risk: { type: 'string', enum: ['Low', 'Moderate', 'High', 'Critical'] },
-      summary: { type: 'string', description: '2-4 short paragraphs: what the code does, dominant risk themes, and whether it is reasonable for a critical path.' },
-      findings: {
-        type: 'array',
-        maxItems: 60,
-        items: {
-          type: 'object',
-          properties: {
-            title: { type: 'string', description: 'Short name of the bug, e.g. "Dangling string_view into reused line buffer".' },
-            severity: { type: 'string', enum: SEVERITY_ENUM },
-            category: { type: 'string', description: 'e.g. Use-after-free, Dangling reference, Out-of-bounds read, Signed integer overflow, Data race, Strict aliasing, Buffer overflow.' },
-            cwe: { type: 'string', description: 'e.g. CWE-416. Optional.' },
-            file: { type: 'string', description: 'Path exactly as shown in the source headers.' },
-            line: { type: 'integer', minimum: 1 },
-            detail: { type: 'string', description: 'Why this is a bug and how it fails, 1-3 sentences.' },
-          },
-          required: ['title', 'severity', 'category', 'file', 'line', 'detail'],
+
+// The review's shape, enforced by the API's structured outputs (output_config.format), so the
+// response is always valid JSON in this shape. Structured outputs require additionalProperties:
+// false and don't support maxItems/minimum. Fields come out in this order, so the vulnerabilities
+// are listed before the rating and summary that are drawn from them.
+export const REVIEW_SCHEMA = {
+  type: 'object',
+  properties: {
+    findings: {
+      type: 'array',
+      description: 'Every distinct vulnerability, one entry per bug, most severe first.',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short name of the bug, e.g. "Dangling string_view into reused line buffer".' },
+          severity: { type: 'string', enum: SEVERITY_ENUM },
+          category: { type: 'string', description: 'e.g. Use-after-free, Dangling reference, Out-of-bounds read, Signed integer overflow, Data race, Strict aliasing, Buffer overflow.' },
+          cwe: { type: 'string', description: 'e.g. CWE-416, or an empty string if none fits.' },
+          file: { type: 'string', description: 'Path exactly as shown in the source headers.' },
+          line: { type: 'integer', description: 'Line number from the numbered source (1 or more).' },
+          detail: { type: 'string', description: 'Why this is a bug and how it fails, 1-3 sentences.' },
         },
+        required: ['title', 'severity', 'category', 'cwe', 'file', 'line', 'detail'],
+        additionalProperties: false,
       },
-      recommendations: { type: 'array', items: { type: 'string' }, maxItems: 8 },
     },
-    required: ['overall_risk', 'summary', 'findings', 'recommendations'],
+    overall_risk: { type: 'string', enum: ['Low', 'Moderate', 'High', 'Critical'] },
+    summary: { type: 'string', description: '2-4 short paragraphs: what the code does, dominant risk themes, and whether it is reasonable for a critical path.' },
+    recommendations: { type: 'array', description: 'Up to 8 concrete steps before adopting this code.', items: { type: 'string' } },
   },
+  required: ['findings', 'overall_risk', 'summary', 'recommendations'],
+  additionalProperties: false,
 };
 
 export const DEFAULT_MODEL = 'claude-haiku-5-5';
@@ -148,7 +151,7 @@ export function buildReviewRequest({ repo, contentByPath }) {
 }
 
 export function estimateReviewCost(model, userContent, maxTokens) {
-  const inputTokens = Math.ceil((SYSTEM_PROMPT.length + JSON.stringify(REVIEW_TOOL).length + userContent.length) / 3);
+  const inputTokens = Math.ceil((SYSTEM_PROMPT.length + JSON.stringify(REVIEW_SCHEMA).length + userContent.length) / 3);
   return costUsd(model, inputTokens, maxTokens);
 }
 
@@ -192,7 +195,9 @@ export function normalizeReview(input) {
     if (v && typeof v === 'object' && Array.isArray(v.items)) return v.items;
     return undefined;
   };
-  const list = asList(r.findings) ?? asList(r.vulnerabilities) ?? asList(r.issues);
+  // Prefer whichever field actually holds vulnerabilities; an empty `findings` mustn't hide a full alias.
+  const lists = [r.findings, r.vulnerabilities, r.issues].map(asList).filter(Boolean);
+  const list = lists.find((l) => l.length) ?? lists[0];
   if (!list) return { problem: `findings was ${r.findings === undefined ? 'missing' : typeof r.findings} (keys: ${Object.keys(r).join(', ')})` };
 
   const findings = list
@@ -204,10 +209,21 @@ export function normalizeReview(input) {
       return { ...f, file, line, title: f.title ?? f.name ?? f.summary, detail: f.detail ?? f.description ?? f.explanation };
     });
   const recommendations = (asList(r.recommendations) ?? []).map(String);
-  return { review: { ...r, findings, recommendations, summary: String(r.summary ?? '') } };
+  const risk = String(r.overall_risk ?? '').trim().toLowerCase();
+  const overall_risk = ['low', 'moderate', 'high', 'critical'].includes(risk) ? risk[0].toUpperCase() + risk.slice(1) : r.overall_risk;
+  return { review: { ...r, overall_risk, findings, recommendations: recommendations.slice(0, 8), summary: String(r.summary ?? '') } };
 }
 
 const HIGH_RATINGS = new Set(['High', 'Critical']);
+
+/** Plain-language reason for the page when both attempts were unusable. */
+function reasonFor(problem = '') {
+  if (/cut off/.test(problem)) return "Claude's review was cut off before it finished, twice";
+  if (problem === 'refusal') return 'Claude declined to review this code';
+  const rated = problem.match(/^rated (\w+) but listed no findings/);
+  if (rated) return `Claude rated the code ${rated[1]} but listed no specific vulnerabilities, twice`;
+  return "Claude's review came back in a form Owl couldn't use, twice";
+}
 
 /**
  * Runs the review. `budget` ({ ledger, clientId }) is optional: when given, the call's
@@ -227,8 +243,7 @@ export async function aiReview({ budget, ...args }) {
     model,
     max_tokens: maxTokens,
     system: SYSTEM_PROMPT,
-    tools: [REVIEW_TOOL],
-    tool_choice: { type: 'tool', name: REVIEW_TOOL.name },
+    output_config: { format: { type: 'json_schema', schema: REVIEW_SCHEMA } },
     messages: [{ role: 'user', content: userContent }],
   });
 
@@ -272,16 +287,21 @@ export async function aiReview({ budget, ...args }) {
     let lastProblem = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const data = await send();
-      const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === REVIEW_TOOL.name);
+      const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       let problem = null;
       let review = null;
       if (data.stop_reason === 'max_tokens') problem = 'cut off at the output limit';
-      else if (!call?.input) problem = 'no structured review in the response';
+      else if (data.stop_reason === 'refusal') problem = 'refusal';
+      else if (!text.trim()) problem = 'no review in the response';
       else {
-        ({ review, problem } = normalizeReview(call.input));
-        if (review && review.findings.length === 0 && HIGH_RATINGS.has(review.overall_risk)) {
-          problem = `rated ${review.overall_risk} but listed no findings`;
-          review = null;
+        const parsed = tryJson(text);
+        if (parsed === undefined) problem = 'response was not valid JSON';
+        else {
+          ({ review, problem } = normalizeReview(parsed));
+          if (review && review.findings.length === 0 && HIGH_RATINGS.has(review.overall_risk)) {
+            problem = `rated ${review.overall_risk} but listed no findings`;
+            review = null;
+          }
         }
       }
       if (review) {
@@ -306,10 +326,7 @@ export async function aiReview({ budget, ...args }) {
       lastProblem = problem;
       console.warn(`Claude review unusable (attempt ${attempt}): ${problem}`);
     }
-    throw new ReviewUnavailableError(
-      /cut off/.test(lastProblem) ? "Claude's review was cut off before it finished" : "Claude's review came back in a form Owl couldn't use, twice",
-      'format',
-    );
+    throw new ReviewUnavailableError(reasonFor(lastProblem), 'format');
   } finally {
     clearTimeout(timer);
     if (reservation !== null) budget.ledger.settle(reservation, costKnown ? spent : Math.max(spent, budget.ledger.reservations.get(reservation)?.usd ?? spent));
