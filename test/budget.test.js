@@ -75,7 +75,7 @@ function fakeClaude({ status = 200, usage = { input_tokens: 2000, output_tokens:
     if (status !== 200) return new Response(JSON.stringify({ error: { message: 'overloaded' } }), { status });
     return new Response(JSON.stringify({
       model: 'claude-haiku-5-5', stop_reason: 'tool_use', usage,
-      content: [{ type: 'tool_use', name: 'report_review', input: { overall_risk: 'High', summary: 's', findings: [], dismissed: [], recommendations: [] } }],
+      content: [{ type: 'tool_use', name: 'report_review', input: { overall_risk: 'High', summary: 's', findings: [{ title: 'Unbounded copy', severity: 'high', category: 'Buffer overflow', file: 'src/a.c', line: 1, detail: 'd' }], recommendations: [] } }],
     }));
   };
   return () => calls;

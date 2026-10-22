@@ -297,7 +297,7 @@ function render(data) {
           <td><b>${esc(r.title)}</b><div class="sub">${esc(r.description)}</div></td>
           <td class="hide-sm mono">${/^CWE-\d+$/.test(r.cwe || '') ? `<a href="https://cwe.mitre.org/data/definitions/${esc(r.cwe.replace('CWE-', ''))}.html" target="_blank" rel="noopener">${esc(r.cwe)}</a>` : esc(r.cwe || '')}</td>
           <td class="num">${fmt(r.count)}</td><td class="num hide-sm">${fmt(r.files)}</td>
-        </tr>`).join('') || '<tr><td colspan="5" class="sub">Nothing found.</td></tr>'}</tbody>
+        </tr>`).join('') || `<tr><td colspan="5" class="sub">${full ? 'Claude reported no vulnerabilities in the code it reviewed.' : 'No risky patterns found.'}</td></tr>`}</tbody>
       </table></div>`)}
 
     ${fold('hotspots-card', 'Riskiest files', data.hotspots.length ? `${fmt(Math.min(10, data.hotspots.length))} file${data.hotspots.length === 1 ? '' : 's'} · top: <code>${esc(data.hotspots[0].file.split('/').pop())}</code>` : 'none',
@@ -449,7 +449,15 @@ function wireFindings(data) {
     const total = data.findings.length;
     $('#findings-count').innerHTML = `${items.length === total ? fmt(total) : `${fmt(items.length)} of ${fmt(total)}`}${bySev.length ? ' · ' + bySev.map(([s, n]) => `${sevPill(s)} ${fmt(n)}`).join(' ') : ''}`;
     list.innerHTML =
-      (items.length ? '' : '<p class="sub">Nothing matches these filters.</p>') +
+      (items.length
+        ? ''
+        : `<p class="sub">${
+            data.findings.length
+              ? 'Nothing matches these filters.'
+              : data.tier === 'full'
+                ? 'Claude reported no vulnerabilities in the code it reviewed.'
+                : 'The basic pattern scan found no risky patterns.'
+          }</p>`) +
       items
         .slice(0, shown)
         .map(

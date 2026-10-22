@@ -92,7 +92,8 @@ async function handleScan(req, res) {
     const budget = { ledger, clientId: clientIdOf(req) };
     const data = await analyze(target, { ai: useAi, budget, onProgress: (message) => send({ type: 'progress', message }) });
     // Only cache complete results: a review skipped for one visitor's budget mustn't be served to others.
-    if (data.tier === 'full') cache.set(key, { at: Date.now(), data });
+    // Only cache complete, non-empty full reviews; anything else should be re-run fresh next time.
+    if (data.tier === 'full' && data.findings.length > 0) cache.set(key, { at: Date.now(), data });
     if (cache.size > 50) cache.delete(cache.keys().next().value);
     send({ type: 'result', data });
   } catch (err) {

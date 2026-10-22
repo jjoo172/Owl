@@ -157,13 +157,71 @@ export function estimateReviewCost(model, userContent, maxTokens) {
  * worst-case cost is reserved first (throwing BudgetExceededError if over a limit) and then
  * settled with the real cost from the API's reported token usage.
  */
+const tryJson = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+const toLine = (v) => {
+  const n = parseInt(String(v ?? '').match(/\d+/)?.[0] ?? '', 10);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+};
+
+/**
+ * Accepts the shapes models actually produce for the review tool, not just the ideal one:
+ * lists sent as JSON text, the review nested one level down, and common field-name variants.
+ * Returns { review } or { problem } (a short description for the logs; never the content).
+ */
+export function normalizeReview(input) {
+  let r = typeof input === 'string' ? tryJson(input) : input;
+  if (r && typeof r === 'object' && !Array.isArray(r) && !('findings' in r)) {
+    const nested = r.review ?? r.result ?? r.report;
+    if (nested && typeof nested === 'object') r = nested;
+  }
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return { problem: `review was ${Array.isArray(r) ? 'an array' : typeof r}` };
+
+  const asList = (v) => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+      const parsed = tryJson(v);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && Array.isArray(parsed.findings)) return parsed.findings;
+    }
+    if (v && typeof v === 'object' && Array.isArray(v.items)) return v.items;
+    return undefined;
+  };
+  const list = asList(r.findings) ?? asList(r.vulnerabilities) ?? asList(r.issues);
+  if (!list) return { problem: `findings was ${r.findings === undefined ? 'missing' : typeof r.findings} (keys: ${Object.keys(r).join(', ')})` };
+
+  const findings = list
+    .map((f) => (typeof f === 'string' ? tryJson(f) : f))
+    .filter((f) => f && typeof f === 'object')
+    .map((f) => {
+      const file = f.file ?? f.path ?? f.file_path ?? f.filename ?? f.location;
+      const line = toLine(f.line ?? f.line_number ?? f.lineNumber ?? f.start_line) ?? toLine(String(file ?? '').match(/:(\d+)/)?.[1]);
+      return { ...f, file, line, title: f.title ?? f.name ?? f.summary, detail: f.detail ?? f.description ?? f.explanation };
+    });
+  const recommendations = (asList(r.recommendations) ?? []).map(String);
+  return { review: { ...r, findings, recommendations, summary: String(r.summary ?? '') } };
+}
+
+const HIGH_RATINGS = new Set(['High', 'Critical']);
+
+/**
+ * Runs the review. `budget` ({ ledger, clientId }) is optional: when given, the call's
+ * worst-case cost is reserved first (throwing BudgetExceededError if over a limit) and then
+ * settled with the real cost from the API's reported token usage.
+ */
 export async function aiReview({ budget, ...args }) {
   const { userContent, selection } = buildReviewRequest(args);
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 8000);
 
   const reservation = budget ? budget.ledger.reserve(budget.clientId, estimateReviewCost(model, userContent, maxTokens)) : null;
-  let actualCost = null; // null = unknown (e.g. timed out after sending): keep the reservation
+  let spent = 0;
+  let costKnown = true; // false once a call may have been billed without us seeing its usage
 
   const body = JSON.stringify({
     model,
@@ -176,10 +234,11 @@ export async function aiReview({ budget, ...args }) {
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REVIEW_TIMEOUT_MS);
-  try {
+
+  /** One API request, with one retry for temporary trouble (rejected calls aren't billed). */
+  const send = async () => {
     let res;
     let data;
-    // One retry for temporary trouble (rate limit, overload, network blip); rejected calls aren't billed.
     for (let attempt = 1; ; attempt++) {
       try {
         res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -189,45 +248,70 @@ export async function aiReview({ budget, ...args }) {
           body,
         });
       } catch (err) {
-        if (err.name === 'AbortError') throw new ReviewUnavailableError("Claude's review took too long", 'timeout');
+        if (err.name === 'AbortError') {
+          costKnown = false;
+          throw new ReviewUnavailableError("Claude's review took too long", 'timeout');
+        }
         if (attempt < 2) {
           await sleep(RETRY_DELAY_MS);
           continue;
         }
-        actualCost = 0;
         throw new ReviewUnavailableError("The server couldn't reach Claude's API", 'network');
       }
       data = await res.json().catch(() => ({}));
       if (res.ok || !TRANSIENT.has(res.status) || attempt >= 2) break;
-      const wait = Math.min(Number(res.headers.get('retry-after')) * 1000 || RETRY_DELAY_MS, 8000);
-      await sleep(wait);
+      await sleep(Math.min(Number(res.headers.get('retry-after')) * 1000 || RETRY_DELAY_MS, 8000));
     }
-    if (data.usage) actualCost = costUsd(data.model || model, data.usage.input_tokens || 0, data.usage.output_tokens || 0);
-    else if (!res.ok) actualCost = 0; // rejected requests aren't billed
+    if (data.usage) spent += costUsd(data.model || model, data.usage.input_tokens || 0, data.usage.output_tokens || 0);
     if (!res.ok) throw unavailableFromResponse(res.status, data);
-    const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === REVIEW_TOOL.name);
-    if (!call?.input) {
-      throw new ReviewUnavailableError("Claude's review came back incomplete", 'incomplete');
+    return data;
+  };
+
+  try {
+    // A response we can't use (malformed, cut off, or a High rating with no findings listed) gets one more try.
+    let lastProblem = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const data = await send();
+      const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === REVIEW_TOOL.name);
+      let problem = null;
+      let review = null;
+      if (data.stop_reason === 'max_tokens') problem = 'cut off at the output limit';
+      else if (!call?.input) problem = 'no structured review in the response';
+      else {
+        ({ review, problem } = normalizeReview(call.input));
+        if (review && review.findings.length === 0 && HIGH_RATINGS.has(review.overall_risk)) {
+          problem = `rated ${review.overall_risk} but listed no findings`;
+          review = null;
+        }
+      }
+      if (review) {
+        return {
+          review,
+          meta: {
+            model: data.model,
+            usage: data.usage,
+            costUsd: spent,
+            attempts: attempt,
+            coverage: {
+              mode: selection.mode,
+              filesInFull: selection.files.length,
+              totalFiles: selection.totalFiles,
+              reviewedChars: selection.reviewedChars,
+              totalChars: selection.totalChars,
+              skipped: selection.skipped,
+            },
+          },
+        };
+      }
+      lastProblem = problem;
+      console.warn(`Claude review unusable (attempt ${attempt}): ${problem}`);
     }
-    if (data.stop_reason === 'max_tokens') throw new ReviewUnavailableError("Claude's review was cut off before it finished", 'incomplete');
-    return {
-      review: call.input,
-      meta: {
-        model: data.model,
-        usage: data.usage,
-        costUsd: actualCost,
-        coverage: {
-          mode: selection.mode,
-          filesInFull: selection.files.length,
-          totalFiles: selection.totalFiles,
-          reviewedChars: selection.reviewedChars,
-          totalChars: selection.totalChars,
-          skipped: selection.skipped,
-        },
-      },
-    };
+    throw new ReviewUnavailableError(
+      /cut off/.test(lastProblem) ? "Claude's review was cut off before it finished" : "Claude's review came back in a form Owl couldn't use, twice",
+      'format',
+    );
   } finally {
     clearTimeout(timer);
-    if (reservation !== null && actualCost !== null) budget.ledger.settle(reservation, actualCost);
+    if (reservation !== null) budget.ledger.settle(reservation, costKnown ? spent : Math.max(spent, budget.ledger.reservations.get(reservation)?.usd ?? spent));
   }
 }
