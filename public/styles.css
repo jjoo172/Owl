@@ -66,8 +66,22 @@ button {
 .examples { margin: 0; color: var(--muted); font-size: 13px; flex-basis: 100%; }
 button.link { background: none; border: none; padding: 0 4px; color: var(--accent); font-family: var(--mono); font-size: 13px; }
 
-/* Status & error */
-.status { display: flex; align-items: center; gap: 12px; margin: 22px 0; color: var(--muted); }
+/* Two-step progress */
+.steps { margin-top: 22px; display: grid; gap: 16px; }
+.step + .step { border-top: 1px solid var(--line); padding-top: 14px; }
+.step-head { display: flex; align-items: center; gap: 10px; }
+.step-num { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); flex: none; }
+.step-state { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.step-state.pass { color: var(--ok); } .step-state.fail { color: var(--critical); }
+.step-note { margin: 6px 0 0 32px; }
+.checks { list-style: none; margin: 10px 0 0 32px; padding: 0; display: grid; gap: 6px; }
+.checks li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 6px; }
+.checks .ic { font-weight: 800; text-align: center; }
+.checks .pass .ic { color: var(--ok); } .checks .warn .ic { color: var(--medium); } .checks .fail .ic { color: var(--critical); }
+.checks .d { color: var(--muted); font-size: 13px; word-break: break-word; }
+.spinner.sm { width: 14px; height: 14px; }
+
+/* Error */
 .spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .error { margin: 22px 0; padding: 14px 16px; border-radius: 12px; border: 1px solid #5c2630; background: #2a141a; color: #ffc2c9; }

@@ -35,6 +35,11 @@ export function parseRepoInput(input, refOverride) {
   return { owner, repo, ref };
 }
 
+/** Direct archive URL for a commit (not counted against GitHub's API rate limit). */
+export function codeloadUrl(owner, repo, sha) {
+  return `https://codeload.github.com/${owner}/${repo}/tar.gz/${sha}`;
+}
+
 /** Reads C/C++ source files from a local checkout (used by the CLI's --dir mode). */
 export async function readLocalSourceFiles(dir) {
   const { readdir, readFile, stat } = await import('node:fs/promises');
@@ -70,16 +75,19 @@ function extOf(path) {
 }
 
 /**
- * Streams the repo tarball from GitHub and returns only C/C++ source files.
- * Documentation, build scripts and other text files are ignored by design.
+ * Streams the source archive for one commit (as confirmed by the access check)
+ * and returns only C/C++ source files. Docs, build scripts and other text files
+ * are ignored by design.
  */
-export async function fetchSourceFiles({ owner, repo, ref }) {
-  const headers = { 'User-Agent': 'owl-scanner', Accept: 'application/vnd.github+json' };
-  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/tarball${ref ? '/' + encodeURIComponent(ref) : ''}`;
-  const res = await fetch(apiUrl, { headers, redirect: 'follow' });
-  if (res.status === 404) throw new UserError(`Repository ${owner}/${repo}${ref ? ' @ ' + ref : ''} not found (or it is private).`, 404);
+export async function fetchSourceFiles({ owner, repo, sha }) {
+  if (!/^[0-9a-f]{40}$/.test(sha || '')) throw new UserError('Missing or invalid commit — run the access check first.', 400);
+  let res;
+  try {
+    res = await fetch(codeloadUrl(owner, repo, sha), { headers: { 'User-Agent': 'owl-scanner' } });
+  } catch (err) {
+    throw new UserError(`Could not download the repository from GitHub (${err.message}).`, 502);
+  }
+  if (res.status === 404) throw new UserError(`Commit ${sha.slice(0, 10)} of ${owner}/${repo} is no longer available.`, 404);
   if (res.status === 429 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0')) {
     throw new UserError('GitHub rate limit reached. Try again later, or set GITHUB_TOKEN on the server.', 429);
   }
@@ -131,6 +139,5 @@ export async function fetchSourceFiles({ owner, repo, ref }) {
     },
   });
 
-  const sha = /^[0-9a-f]{40}$/.test(globalPax.comment || '') ? globalPax.comment : null;
-  return { files, stats, sha, downloadedBytes: downloaded };
+  return { files, stats, sha: /^[0-9a-f]{40}$/.test(globalPax.comment || '') ? globalPax.comment : sha, downloadedBytes: downloaded };
 }

@@ -65,6 +65,49 @@ test('memory management patterns', () => {
   assert.ok(!ids('  int arr[MAX];').includes('vla'));
 });
 
+test('lifetime / UB rules', () => {
+  const cpp = (s) => ids(s, 'a.cpp');
+  assert.ok(cpp('    add([&] { std::cout << label; });').includes('deferred-ref-lambda'));
+  assert.ok(cpp('pool.emplace_back([&] {').includes('deferred-ref-lambda'));
+  assert.ok(!cpp('std::for_each(v.begin(), v.end(), [&](int x) { s += x; });').includes('deferred-ref-lambda'));
+  assert.ok(!cpp('add([=] { run(); });').includes('deferred-ref-lambda'));
+
+  assert.ok(cpp('for (const auto& h : registry.snapshot().items()) {').includes('temporary-range-for'));
+  assert.ok(!cpp('for (const auto& h : registry.items()) {').includes('temporary-range-for'));
+  assert.ok(!cpp('for (std::size_t i = 0; i < n; ++i) {').includes('temporary-range-for'));
+  assert.ok(!cpp('for (const std::string& s : names) {').includes('temporary-range-for'));
+
+  assert.ok(cpp('          [](int a, int b) { return a <= b; });').includes('non-strict-comparator'));
+  assert.ok(!cpp('[](int a, int b) { return a < b; }').includes('non-strict-comparator'));
+
+  assert.ok(cpp('const std::string& fallback = "");').includes('ref-param-temp-default'));
+  assert.ok(!cpp('const std::string& name = other;').includes('ref-param-temp-default'));
+  assert.ok(cpp('return (1u << bits) - 1u;').includes('variable-shift'));
+  assert.ok(!cpp('return (1u << 4) - 1u;').includes('variable-shift'));
+});
+
+test('AI review gets full source for small repos, a prioritised subset for large ones', async () => {
+  const { selectSourceForReview, buildReviewRequest } = await import('../src/ai.js');
+  const small = new Map([['src/a.cpp', 'int a;'], ['src/b.cpp', 'int b;'], ['tests/t.cpp', 'int t;']]);
+  const s = selectSourceForReview(small, []);
+  assert.equal(s.mode, 'full');
+  assert.deepEqual(s.files.sort(), ['src/a.cpp', 'src/b.cpp']); // tests excluded
+
+  const big = new Map([
+    ['src/hot.cpp', 'x'.repeat(400)],
+    ['src/subtle.cpp', 'std::string_view v; [&]{}; reinterpret_cast<int*>(p);' + 'y'.repeat(300)],
+    ['src/plain.cpp', 'z'.repeat(400)],
+  ]);
+  const p = selectSourceForReview(big, [{ file: 'src/hot.cpp' }], 1000);
+  assert.equal(p.mode, 'partial');
+  assert.deepEqual(p.files, ['src/hot.cpp', 'src/subtle.cpp']);
+
+  const report = scanRepository([...small].map(([path, content]) => ({ path, content })));
+  const req = buildReviewRequest({ repo: { owner: 'o', repo: 'r' }, report, allFindings: report._allFindings, contentByPath: report._contentByPath });
+  assert.match(req.userContent, /### FILE src\/a\.cpp/);
+  assert.match(req.userContent, /All 2 non-test source files are included in full/);
+});
+
 test('path classification', () => {
   assert.equal(classifyPath('src/parser.c'), 'production');
   assert.equal(classifyPath('tests/parser_test.c'), 'test');
@@ -86,4 +129,11 @@ test('repo input parsing', () => {
   assert.deepEqual(parseRepoInput('https://github.com/madler/zlib.git'), { owner: 'madler', repo: 'zlib', ref: undefined });
   assert.deepEqual(parseRepoInput('github.com/a/b/tree/dev'), { owner: 'a', repo: 'b', ref: 'dev' });
   assert.throws(() => parseRepoInput('not a repo'));
+});
+
+test('AI selection never comes back empty', async () => {
+  const { selectSourceForReview } = await import('../src/ai.js');
+  const huge = new Map([['src/a.c', 'a'.repeat(5000)], ['src/b.c', 'b'.repeat(5000)]]);
+  const s = selectSourceForReview(huge, [{ file: 'src/b.c' }], 1000);
+  assert.deepEqual(s.files, ['src/b.c']);
 });

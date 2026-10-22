@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, extname } from 'node:path';
 import { analyze } from './analyze.js';
 import { aiAvailable } from './ai.js';
+import { checkRepository } from './access.js';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PORT = process.env.PORT || 3000;
@@ -58,10 +59,17 @@ async function handleScan(req, res) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ type: 'error', message: 'Bad request' }));
   }
-  const { repo, ref, ai = true } = input;
-  const useAi = Boolean(ai) && aiAvailable();
+  // Step 2 scans exactly the commit that step 1 (/api/check) confirmed.
+  const { owner, repo, ref, sha, ai = true } = input;
   const send = (obj) => res.write(JSON.stringify(obj) + '\n');
-  const key = `${String(repo).toLowerCase().trim()}@${ref || ''}@${useAi}`;
+  if (!/^[\w.-]+$/.test(owner || '') || !/^[\w.-]+$/.test(repo || '') || !/^[0-9a-f]{40}$/.test(sha || '')) {
+    res.writeHead(400, { 'Content-Type': 'application/x-ndjson' });
+    send({ type: 'error', message: 'Scan requests need the owner, repo and commit from the access check. Run the check first.' });
+    return res.end();
+  }
+  const target = { owner, repo, ref: typeof ref === 'string' ? ref : undefined, sha };
+  const useAi = Boolean(ai) && aiAvailable();
+  const key = `${owner}/${repo}@${sha}@${useAi}`.toLowerCase();
 
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
@@ -79,12 +87,12 @@ async function handleScan(req, res) {
   active++;
   const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
   try {
-    const data = await analyze(repo, { ref, ai: useAi, onProgress: (message) => send({ type: 'progress', message }) });
+    const data = await analyze(target, { ai: useAi, onProgress: (message) => send({ type: 'progress', message }) });
     cache.set(key, { at: Date.now(), data });
     if (cache.size > 50) cache.delete(cache.keys().next().value);
     send({ type: 'result', data });
   } catch (err) {
-    console.error('scan failed', repo, err);
+    console.error('scan failed', `${owner}/${repo}@${sha}`, err);
     send({ type: 'error', message: err.status ? err.message : 'Something went wrong while scanning that repository.' });
   } finally {
     clearInterval(heartbeat);
@@ -93,12 +101,39 @@ async function handleScan(req, res) {
   }
 }
 
+// Step 1: is the repository readable? Plain JSON, no scanning.
+const checkCache = new Map(); // short-lived, saves GitHub API quota on repeat checks
+async function handleCheck(req, res) {
+  const url = new URL(req.url, 'http://x');
+  const repo = url.searchParams.get('repo') || '';
+  const ref = url.searchParams.get('ref') || '';
+  const key = `${repo.toLowerCase().trim()}@${ref.trim()}`;
+  let result;
+  const hit = checkCache.get(key);
+  if (hit && Date.now() - hit.at < 2 * 60 * 1000) result = hit.result;
+  else {
+    try {
+      result = await checkRepository(repo, ref || undefined);
+    } catch (err) {
+      console.error('check failed', repo, err);
+      result = { canScan: false, checks: [{ id: 'server', label: 'Access check', status: 'fail', detail: 'The server hit an unexpected error while checking this repository.' }] };
+    }
+    if (result.canScan) {
+      checkCache.set(key, { at: Date.now(), result });
+      if (checkCache.size > 200) checkCache.delete(checkCache.keys().next().value);
+    }
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(result));
+}
+
 const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   if (path === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, ai: aiAvailable() }));
+    return res.end(JSON.stringify({ ok: true, ai: aiAvailable(), githubToken: Boolean(process.env.GITHUB_TOKEN) }));
   }
+  if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
   res.writeHead(405).end();

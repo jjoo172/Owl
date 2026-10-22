@@ -5,11 +5,14 @@ const SEVERITIES = ['critical', 'high', 'medium', 'low'];
 const SEV_COLOR = { critical: 'var(--critical)', high: 'var(--high)', medium: 'var(--medium)', low: 'var(--low)' };
 
 const form = $('#scan-form');
-const statusEl = $('#status');
-const statusText = $('#status-text');
+const stepsEl = $('#steps');
 const errorEl = $('#error');
 const resultsEl = $('#results');
 const btn = $('#scan-btn');
+
+const NO_SERVER_MESSAGE =
+  "Owl's scan server isn't answering on this site, so scans can't run. This usually means the page is being " +
+  'served by a static site; open the "owl-scanner" web service deployed from render.yaml instead.';
 
 let current = null;
 
@@ -25,7 +28,7 @@ fetch('/api/health')
       hint.textContent = 'Expert review is off on this server (set ANTHROPIC_API_KEY to enable it). The pattern scan still runs.';
     }
   })
-  .catch(() => {});
+  .catch(() => showError(NO_SERVER_MESSAGE));
 
 document.querySelectorAll('[data-repo]').forEach((b) =>
   b.addEventListener('click', () => {
@@ -44,11 +47,33 @@ if (params.get('repo')) {
 
 form.addEventListener('submit', (e) => {
   e.preventDefault();
-  runScan($('#repo').value.trim(), $('#ref').value.trim(), $('#ai').checked);
+  run($('#repo').value.trim(), $('#ref').value.trim(), $('#ai').checked);
 });
 
-// ---------- scanning ----------
-async function runScan(repo, ref, ai) {
+function showError(message) {
+  errorEl.textContent = message;
+  errorEl.hidden = false;
+}
+
+function setStep(n, state, text) {
+  const el = $(`#step${n}-state`);
+  el.className = `step-state ${state}`;
+  el.innerHTML =
+    state === 'running' ? `<span class="spinner sm" aria-hidden="true"></span>${esc(text)}` :
+    state === 'pass' ? `✓ ${esc(text)}` :
+    state === 'fail' ? `✗ ${esc(text)}` : esc(text || '');
+}
+
+function renderChecks(checks) {
+  const icon = { pass: '✓', warn: '!', fail: '✗' };
+  $('#checks').innerHTML = checks
+    .map((c) => `<li class="${esc(c.status)}"><span class="ic" aria-label="${esc(c.status)}">${icon[c.status] || '·'}</span>
+      <div><b>${esc(c.label)}</b><div class="d">${esc(c.detail)}</div></div></li>`)
+    .join('');
+}
+
+// ---------- the two steps ----------
+async function run(repo, ref, ai) {
   if (!repo) return;
   const url = new URL(location.href);
   url.searchParams.set('repo', repo);
@@ -58,16 +83,75 @@ async function runScan(repo, ref, ai) {
   btn.disabled = true;
   errorEl.hidden = true;
   resultsEl.hidden = true;
-  statusEl.hidden = false;
-  statusText.textContent = 'Starting…';
+  stepsEl.hidden = false;
+  current = null;
+  $('#checks').innerHTML = '';
+  $('#step2-text').textContent = 'Starts once the access check passes.';
+  setStep(1, 'running', 'Checking…');
+  setStep(2, 'idle', 'Waiting');
 
   try {
-    const res = await fetch('/api/scan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo, ref: ref || undefined, ai }),
-    });
-    if (!res.body) throw new Error('No response from server.');
+    const check = await accessCheck(repo, ref);
+    if (!check) return;
+    await scan(check.target, ai);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Step 1: is the repository readable? Returns the check result, or null if it failed. */
+async function accessCheck(repo, ref) {
+  let res;
+  try {
+    res = await fetch(`/api/check?${new URLSearchParams({ repo, ...(ref ? { ref } : {}) })}`);
+  } catch {
+    setStep(1, 'fail', 'Server unreachable');
+    showError('Could not reach the Owl server. Check your connection and that the service is running.');
+    return null;
+  }
+  let check;
+  try {
+    if (!(res.headers.get('content-type') || '').includes('application/json')) throw new Error();
+    check = await res.json();
+  } catch {
+    setStep(1, 'fail', `No scan server (HTTP ${res.status})`);
+    showError(NO_SERVER_MESSAGE);
+    return null;
+  }
+  renderChecks(check.checks || []);
+  if (!check.canScan) {
+    const failed = (check.checks || []).find((c) => c.status === 'fail');
+    setStep(1, 'fail', 'Failed');
+    $('#step2-text').textContent = 'Not started — fix the failed check above and try again.';
+    setStep(2, 'idle', 'Not started');
+    if (failed) showError(`${failed.label}: ${failed.detail}`);
+    return null;
+  }
+  const warns = check.checks.filter((c) => c.status === 'warn').length;
+  setStep(1, 'pass', warns ? `Passed with ${warns} warning${warns > 1 ? 's' : ''}` : 'Passed');
+  return check;
+}
+
+/** Step 2: scan the exact commit the access check confirmed. */
+async function scan(target, ai) {
+  setStep(2, 'running', 'Starting…');
+  $('#step2-text').textContent = `Scanning ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`;
+  let gotResult = false;
+  let lastStage = 'starting';
+  try {
+    let res;
+    try {
+      res = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...target, ai }),
+      });
+    } catch {
+      throw new Error('Lost contact with the Owl server when starting the scan. Try again.');
+    }
+    if (!(res.headers.get('content-type') || '').includes('application/x-ndjson') || !res.body) {
+      throw new Error(`The scan endpoint answered HTTP ${res.status} without scan data. ${NO_SERVER_MESSAGE}`);
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -81,22 +165,33 @@ async function runScan(repo, ref, ai) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        const msg = JSON.parse(line);
-        if (msg.type === 'progress') statusText.textContent = msg.message + '…';
-        else if (msg.type === 'error') throw new Error(msg.message);
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          throw new Error('The server sent a response Owl could not read. Try again in a moment.');
+        }
+        if (msg.type === 'progress') {
+          lastStage = msg.message;
+          setStep(2, 'running', msg.message + '…');
+        } else if (msg.type === 'error') throw new Error(msg.message);
         else if (msg.type === 'result') {
+          gotResult = true;
           current = msg.data;
           render(msg.data);
         }
       }
     }
-    if (!current) throw new Error('The scan ended without a result.');
+    if (!gotResult) {
+      throw new Error(
+        `The connection closed during "${lastStage}" before a result arrived. This usually means the server ` +
+          'restarted mid-scan (for example, it ran out of memory on a large repository). Try again, or try a smaller repository.',
+      );
+    }
+    setStep(2, 'pass', `Done in ${(current.durationMs / 1000).toFixed(1)}s${current.cached ? ' (cached)' : ''}`);
   } catch (err) {
-    errorEl.textContent = err.message || String(err);
-    errorEl.hidden = false;
-  } finally {
-    btn.disabled = false;
-    statusEl.hidden = true;
+    setStep(2, 'fail', 'Failed');
+    showError(err.message || String(err));
   }
 }
 
@@ -183,7 +278,7 @@ function render(data) {
     <section class="card" id="findings-card">
       <h2>Findings</h2>
       <div class="filters">
-        ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" ${s === 'low' ? '' : 'checked'}> <span class="sev sev-${s}">${s}</span></label>`).join('')}
+        ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" ${s === 'low' && data.findings.some((f) => f.severity !== 'low') ? '' : 'checked'}> <span class="sev sev-${s}">${s}</span></label>`).join('')}
         <label><input type="checkbox" id="f-tests"> include test / example code</label>
         <select id="f-rule"><option value="">All patterns</option>${data.ruleSummary.map((r) => `<option value="${esc(r.ruleId)}">${esc(r.title)}</option>`).join('')}</select>
         <input type="search" id="f-text" placeholder="Filter by path or code…">
@@ -244,7 +339,13 @@ function renderAi(data) {
         ${(ai.recommendations || []).length ? `<div><h3>Before adopting</h3><ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></div>` : ''}
         ${(ai.likely_false_positives || []).length ? `<div><h3>Likely false positives</h3><ul class="plain">${ai.likely_false_positives.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></div>` : ''}
       </div>
-      <p class="sub">Reviewed ${fmt(ai.reviewedFindings)} of the most severe hits in context · ${esc(ai.model || '')}</p>
+      <p class="sub">${
+        ai.coverage
+          ? ai.coverage.mode === 'full'
+            ? `Claude read all ${fmt(ai.coverage.totalFiles)} non-test source files in full`
+            : `Claude read ${fmt(ai.coverage.filesInFull)} of ${fmt(ai.coverage.totalFiles)} non-test source files in full (highest-risk first)${ai.coverage.excerpts ? ` plus ${fmt(ai.coverage.excerpts)} excerpts` : ''}`
+          : ''
+      } · ${esc(ai.model || '')}</p>
     </section>`;
   }
   if (data.aiError) return `<section class="card"><h2>Expert review</h2><p class="sub">${esc(data.aiError)} The pattern-based results below are still complete.</p></section>`;

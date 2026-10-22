@@ -9,7 +9,17 @@ text files are ignored.
 
 ## How it works
 
-1. **Download** — streams the repository tarball from GitHub and keeps only C/C++ source files.
+Every scan runs in two steps.
+
+**Step 1 — access check** (`GET /api/check?repo=…&ref=…`, plain JSON, no scanning). Confirms, one
+check at a time and with a reason for each: the address is a GitHub repo, it exists and is public,
+the branch/tag/commit resolves to a commit, it contains C/C++, it's within size limits, and the
+source archive for that commit actually downloads. It also reports whether the Claude review is
+enabled. Step 2 only starts if nothing failed.
+
+**Step 2 — scan** (`POST /api/scan`, streamed progress) of exactly the commit step 1 confirmed:
+
+1. **Download** — streams the source archive for that commit and keeps only C/C++ source files.
 2. **Pattern scan** — strips comments and string literals, then checks every line against
    ~20 rules mapped to CWEs:
 
@@ -25,10 +35,12 @@ text files are ignored.
 3. **Risk rating** — severity-weighted hits per 1,000 lines of non-test code give a
    Low / Moderate / High / Critical rating, adjusted for critical/high hits and offset
    notes for modern C++ idioms (smart pointers, spans, containers) and fuzz harnesses.
-4. **Expert review (optional)** — if `ANTHROPIC_API_KEY` is set, the most severe hits are
-   sent with surrounding code to Claude, prompted as an expert C++ safety researcher, which
-   confirms or dismisses them in context and writes the overall risk summary,
-   top concerns and recommendations.
+4. **Expert review (optional)** — if `ANTHROPIC_API_KEY` is set, Claude (prompted as an expert
+   C++ safety researcher) reads the source itself: every non-test file when the repo fits in
+   ~150k characters, otherwise the highest-risk files in full plus excerpts around other hits.
+   It looks for the bugs patterns can't see — dangling references, invalidated iterators,
+   undefined behaviour, data races — judges the scanner hits in context, and writes the overall
+   risk summary, top concerns and recommendations.
 
 Pattern matching finds *candidates*, not confirmed bugs — treat findings as a review checklist.
 
@@ -40,7 +52,8 @@ Requires Node 20+. No dependencies.
 npm start                      # web UI on http://localhost:3000
 npm test                       # unit tests
 
-node src/cli.js madler/zlib    # scan from the command line
+node src/cli.js madler/zlib    # access check, then scan
+node src/cli.js madler/zlib --check-only
 node src/cli.js --dir ../some-checkout --no-ai
 node src/cli.js owner/repo --ref v1.2.3 --json > report.json
 ```
@@ -55,5 +68,13 @@ node src/cli.js owner/repo --ref v1.2.3 --json > report.json
    - `GITHUB_TOKEN` — any GitHub token; raises the download limit from 60 to 5,000 per hour (optional).
 3. Apply. The app is served at `https://owl-scanner-*.onrender.com`; pushes to `main` redeploy it.
 
-Other optional settings: `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `MAX_TARBALL_MB`
+Make sure you open the **web service** URL. If the page is served by a static site instead,
+step 1 reports "scan server isn't answering" because there is no backend to run scans.
+
+Each scan makes three GitHub API calls (repo, commit, languages); without `GITHUB_TOKEN`
+GitHub allows 60 per hour, so about 20 scans an hour. The archive download itself is not
+rate-limited.
+
+Other optional settings: `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `AI_SOURCE_BUDGET_CHARS`
+(default 150000), `MAX_TARBALL_MB`
 (default 300), `MAX_SOURCE_FILES` (default 25000), `MAX_CONCURRENT_SCANS` (default 2).

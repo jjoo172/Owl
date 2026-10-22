@@ -1,27 +1,40 @@
 #!/usr/bin/env node
-// Usage: node src/cli.js <owner/repo | github url> [--ref <branch|tag|sha>] [--no-ai] [--json]
+// Usage: node src/cli.js <owner/repo | github url> [--ref <branch|tag|sha>] [--no-ai] [--json] [--check-only]
 //        node src/cli.js --dir <path to local checkout> [--no-ai] [--json]
 import { analyze } from './analyze.js';
+import { checkRepository } from './access.js';
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const opt = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 const repo = args.find((a, i) => !a.startsWith('--') && !['--ref', '--dir'].includes(args[i - 1]));
 const dir = opt('--dir');
+const json = flag('--json');
+const log = (m) => !json && console.error(m);
 
 if (!repo && !dir) {
-  console.error('Usage: node src/cli.js <owner/repo> [--ref <ref>] [--no-ai] [--json]\n       node src/cli.js --dir <path> [--no-ai] [--json]');
+  console.error('Usage: node src/cli.js <owner/repo> [--ref <ref>] [--no-ai] [--json] [--check-only]\n       node src/cli.js --dir <path> [--no-ai] [--json]');
   process.exit(1);
 }
 
-const result = await analyze(repo, {
-  dir,
-  ref: opt('--ref'),
-  ai: !flag('--no-ai'),
-  onProgress: (m) => !flag('--json') && console.error(`… ${m}`),
-});
+let target;
+if (!dir) {
+  // Step 1: access check
+  log('Step 1 — access check');
+  const check = await checkRepository(repo, opt('--ref'));
+  const icon = { pass: '✓', warn: '!', fail: '✗' };
+  for (const c of check.checks) log(`  ${icon[c.status]} ${c.label}: ${c.detail}`);
+  if (flag('--check-only') || !check.canScan) {
+    if (json) console.log(JSON.stringify(check, null, 2));
+    process.exit(check.canScan ? 0 : 2);
+  }
+  target = check.target;
+  log('Step 2 — scan');
+}
 
-if (flag('--json')) {
+const result = await analyze(target, { dir, ai: !flag('--no-ai'), onProgress: (m) => log(`  … ${m}`) });
+
+if (json) {
   console.log(JSON.stringify(result, null, 2));
   process.exit(0);
 }

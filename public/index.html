@@ -51,9 +51,16 @@
       </p>
     </form>
 
-    <section id="status" class="status" hidden aria-live="polite">
-      <div class="spinner" aria-hidden="true"></div>
-      <span id="status-text">Starting…</span>
+    <section id="steps" class="card steps" hidden aria-live="polite">
+      <div class="step" id="step1">
+        <div class="step-head"><span class="step-num">1</span><b>Access check</b><span class="step-state" id="step1-state"></span></div>
+        <p class="sub step-note">Confirms the repository is public, the branch exists and its source can be downloaded — before any scanning starts.</p>
+        <ul class="checks" id="checks"></ul>
+      </div>
+      <div class="step" id="step2">
+        <div class="step-head"><span class="step-num">2</span><b>Scan</b><span class="step-state" id="step2-state"></span></div>
+        <p class="sub step-note" id="step2-text">Starts once the access check passes.</p>
+      </div>
     </section>
 
     <section id="error" class="error" hidden role="alert"></section>

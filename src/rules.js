@@ -187,6 +187,43 @@ export const RULES = [
     re: /no_sanitize|__no_sanitize|NO_SANITIZE|#\s*pragma\s+(?:GCC|clang)\s+diagnostic\s+ignored|#\s*pragma\s+warning\s*\(\s*disable/,
   },
   {
+    id: 'deferred-ref-lambda',
+    title: 'Reference-capturing lambda stored or deferred',
+    severity: 'medium',
+    category: 'Lifetime (dangling reference)',
+    cwe: 'CWE-416',
+    description:
+      'A [&] lambda is handed to something that may run it later (queue, callback, thread). If it outlives the captured locals it reads freed stack memory.',
+    re: /(?:\b(?:add|push_back|emplace_back|push|push_front|emplace|post|submit|enqueue|schedule|defer|then|async|connect|subscribe|set_callback|on_\w+)\s*\(|std::thread\s*[({]|std::jthread\s*[({])[^;]*?\[\s*&/,
+  },
+  {
+    id: 'temporary-range-for',
+    title: 'Range-for over a member of a temporary',
+    severity: 'medium',
+    category: 'Lifetime (dangling reference)',
+    cwe: 'CWE-416',
+    description:
+      'for (x : f().items()) — before C++23 only the outermost temporary is kept alive, so the loop iterates storage that has already been destroyed.',
+    test: (code) => {
+      const m = code.match(/\bfor\s*\((.*)\)/);
+      if (!m) return false;
+      const parts = m[1].split(/(?<!:):(?!:)/);
+      if (parts.length < 2) return false;
+      const range = parts.slice(1).join(':').trim();
+      return /\)\s*\.\s*\w+\s*(?:\(\s*\))?$/.test(range);
+    },
+  },
+  {
+    id: 'non-strict-comparator',
+    title: 'Comparator using <= or >=',
+    severity: 'medium',
+    category: 'Undefined behaviour',
+    cwe: 'CWE-758',
+    description:
+      'Sorting/ordered containers require a strict weak ordering. A <= / >= comparator is undefined behaviour; std::sort can read out of bounds.',
+    re: /\[[^\]]*\]\s*\(\s*[^,()]+,\s*[^,()]+\)\s*(?:->\s*bool\s*)?\{\s*return\s+[\w.\->()[\]]+\s*(?:<=|>=)\s*[\w.\->()[\]]+\s*;\s*\}/,
+  },
+  {
     id: 'manual-alloc',
     title: 'Manual heap management (malloc/free)',
     severity: 'low',
@@ -230,6 +267,25 @@ export const RULES = [
     cwe: 'CWE-190',
     description: 'atoi/atol report no errors and overflow silently; parsed values used as sizes/indices become dangerous.',
     re: call('atoi|atol|atoll|_wtoi|_ttoi'),
+  },
+  {
+    id: 'ref-param-temp-default',
+    title: 'Reference parameter defaulted to a temporary',
+    severity: 'low',
+    category: 'Lifetime (dangling reference)',
+    cwe: 'CWE-562',
+    description:
+      'const T& x = "" binds to a temporary that dies at the end of the call. Harmless unless the reference is returned or stored — then it dangles.',
+    re: /\bconst\s+[\w:<>]+\s*&\s*\w+\s*=\s*(?:"|\{|[\w:<>]+\s*[({]|-?\d)/,
+  },
+  {
+    id: 'variable-shift',
+    title: 'Shift by a variable amount',
+    severity: 'low',
+    category: 'Undefined behaviour',
+    cwe: 'CWE-1335',
+    description: 'Shifting by ≥ the type width (e.g. 1u << 32) or a negative amount is undefined behaviour.',
+    re: /\b1[uUlL]*\s*<<\s*\(?\s*[a-z_][\w.\->]*/,
   },
   {
     id: 'strtok',

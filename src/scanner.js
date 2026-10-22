@@ -204,6 +204,12 @@ export function assessRisk({ allFindings, loc, locByKind, mitigationTotals, byLa
     rationale.push(`${mitigationTotals['fuzz-harness']} fuzz harness${mitigationTotals['fuzz-harness'] > 1 ? 'es' : ''} present — evidence the parsing surface is actively fuzzed.`);
   }
 
+  if (idx <= 1) {
+    rationale.push(
+      "Pattern scanning can't see most lifetime, aliasing or concurrency bugs (dangling references, invalidated iterators, data races), so a low score here is not a clean bill of health — the expert review reads the code for those.",
+    );
+  }
+
   // Keep the 0–100 score inside the band of the chosen level (Low 0–24 … Critical 75–100).
   const banded = Math.min(Math.max(score, idx * 25), idx * 25 + (idx === 3 ? 25 : 24));
   return { level: LEVELS[idx], score: banded, density: Math.round(density * 10) / 10, rationale };

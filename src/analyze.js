@@ -1,19 +1,19 @@
 import { basename, resolve } from 'node:path';
-import { fetchSourceFiles, parseRepoInput, readLocalSourceFiles } from './github.js';
+import { fetchSourceFiles, readLocalSourceFiles, UserError } from './github.js';
 import { scanRepository } from './scanner.js';
 import { aiAvailable, aiReview } from './ai.js';
 
 /**
- * Full pipeline: download → scan source → (optional) expert AI review.
- * Pass `dir` to scan a local checkout instead of downloading from GitHub.
+ * Step 2: download the confirmed commit → scan source → (optional) expert review.
+ * `target` is { owner, repo, ref, sha } from the access check (step 1).
+ * Pass `dir` instead to scan a local checkout.
  */
-export async function analyze(repoInput, { ref, dir, ai = true, onProgress = () => {} } = {}) {
-  const repo = dir
-    ? { owner: 'local', repo: basename(resolve(dir)), ref: undefined }
-    : parseRepoInput(repoInput, ref);
+export async function analyze(target, { dir, ai = true, onProgress = () => {} } = {}) {
+  const repo = dir ? { owner: 'local', repo: basename(resolve(dir)), ref: undefined, sha: null } : target;
+  if (!dir && !repo?.sha) throw new UserError('Run the access check before scanning.', 400);
   const started = Date.now();
 
-  onProgress(dir ? 'Reading local files' : 'Downloading repository');
+  onProgress(dir ? 'Reading local files' : `Downloading ${repo.owner}/${repo.repo} @ ${repo.sha.slice(0, 10)}`);
   const { files, stats: fetchStats, sha, downloadedBytes } = dir ? await readLocalSourceFiles(dir) : await fetchSourceFiles(repo);
 
   onProgress(`Scanning ${files.length.toLocaleString()} source files`);
@@ -38,7 +38,7 @@ export async function analyze(repoInput, { ref, dir, ai = true, onProgress = () 
       ref: repo.ref || null,
       sha,
       url: dir ? null : `https://github.com/${repo.owner}/${repo.repo}`,
-      blobBase: dir ? null : `https://github.com/${repo.owner}/${repo.repo}/blob/${sha || repo.ref || 'HEAD'}/`,
+      blobBase: dir ? null : `https://github.com/${repo.owner}/${repo.repo}/blob/${sha}/`,
     },
     scannedAt: new Date().toISOString(),
     durationMs: Date.now() - started,
