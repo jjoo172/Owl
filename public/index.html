@@ -26,7 +26,7 @@
 
   <main class="wrap">
     <section class="intro">
-      <p>Point Owl at a GitHub repository. It reads <strong>only the C/C++ source</strong> (docs and other text files are ignored), flags memory-unsafe patterns — unbounded copies, format strings, manual lifetimes, integer-overflowing allocations and more — and rates the risk of putting that code in your critical path.</p>
+      <p>Point Owl at a GitHub repository. Claude reviews <strong>only the C/C++ source</strong> (docs and other text files are ignored) for memory-safety bugs — dangling references, use-after-free, out-of-bounds access, undefined behaviour, data races and classic unsafe C — and rates the risk of putting that code in your critical path.</p>
     </section>
 
     <form id="scan-form" class="scan-form" autocomplete="off">
@@ -39,11 +39,7 @@
         <input id="ref" name="ref" placeholder="default branch" spellcheck="false">
       </label>
       <button id="scan-btn" type="submit">Scan</button>
-      <label class="toggle" id="ai-toggle-wrap">
-        <input type="checkbox" id="ai" checked>
-        <span>Expert review with Claude</span>
-      </label>
-      <p class="hint" id="ai-hint" hidden></p>
+      <p class="hint" id="ai-hint">Every scan is a full review by Claude, which reads the source like a security auditor. If Claude is unavailable, Owl falls back to a basic pattern scan and tells you.</p>
       <p class="examples">Try:
         <button type="button" class="link" data-repo="madler/zlib">madler/zlib</button>
         <button type="button" class="link" data-repo="antirez/kilo">antirez/kilo</button>

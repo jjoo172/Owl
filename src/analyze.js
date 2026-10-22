@@ -1,7 +1,7 @@
 import { basename, resolve } from 'node:path';
 import { fetchSourceFiles, readLocalSourceFiles, UserError } from './github.js';
 import { scanRepository } from './scanner.js';
-import { aiAvailable, aiReview } from './ai.js';
+import { aiAvailable, aiReview, ReviewUnavailableError } from './ai.js';
 import { mergeReview } from './merge.js';
 import { BudgetExceededError } from './budget.js';
 
@@ -22,19 +22,28 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
   const report = scanRepository(files);
   const { _contentByPath, _allFindings, ...publicReport } = report;
 
+  // Full review (Claude) is the default; the pattern-only "basic" scan is the fallback.
   let results = publicReport;
   let aiResult = null;
-  let aiError = null;
-  if (ai && aiAvailable() && files.length) {
-    onProgress('Expert review with Claude');
+  let tier = 'basic';
+  let tierReason = null;
+  if (!ai) tierReason = 'Claude review was turned off for this scan';
+  else if (!aiAvailable()) tierReason = "Claude review isn't configured on this server";
+  else if (!files.length) tierReason = 'There is no C/C++ source for Claude to review';
+  else {
+    onProgress('Claude is reviewing the source');
     try {
       const review = await aiReview({ budget, repo, report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath });
       const merged = mergeReview({ report: publicReport, allFindings: _allFindings, contentByPath: _contentByPath, ai: review });
       aiResult = merged.ai;
       results = { ...publicReport, stats: merged.stats, ruleSummary: merged.ruleSummary, hotspots: merged.hotspots, findings: merged.findings };
+      tier = 'full';
     } catch (err) {
-      aiError =
-        err instanceof BudgetExceededError ? err.message : err.name === 'AbortError' ? 'AI review timed out.' : `AI review failed: ${err.message}`;
+      if (err instanceof BudgetExceededError || err instanceof ReviewUnavailableError) tierReason = err.message.replace(/ Showing scanner results only\.$/, '').replace(/\.$/, '');
+      else {
+        console.error('Claude review failed', err);
+        tierReason = "Claude's review failed unexpectedly";
+      }
     }
   }
 
@@ -57,8 +66,9 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
       downloadedBytes,
     },
     ...results,
+    tier,
+    tierReason,
     ai: aiResult,
-    aiError,
     aiEnabled: aiAvailable(),
   };
 }

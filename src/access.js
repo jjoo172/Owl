@@ -3,7 +3,10 @@
 // result pins the exact commit that step 2 will scan.
 
 import { parseRepoInput, codeloadUrl } from './github.js';
-import { aiAvailable } from './ai.js';
+import { aiAvailable, DEFAULT_MODEL } from './ai.js';
+
+export const modelLabel = (id = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL) =>
+  id.replace(/^claude-/, '').replace(/-(\d+)-(\d+)(?:-\d{8})?$/, ' $1.$2').replace(/^\w/, (c) => 'Claude ' + c.toUpperCase());
 
 const MAX_TARBALL_MB = Number(process.env.MAX_TARBALL_MB || 300);
 const C_FAMILY = ['C', 'C++', 'Objective-C++', 'Cuda'];
@@ -123,9 +126,9 @@ export async function checkRepository(input, refOverride) {
   const archive = await probeArchive(canonical.owner, canonical.repo, sha);
   add('archive', 'Source archive downloads', archive.ok ? 'pass' : 'fail', archive.detail);
 
-  // 7. Expert review availability (never blocks scanning)
-  add('ai', 'Expert review (Claude)', aiAvailable() ? 'pass' : 'warn',
-    aiAvailable() ? 'Enabled' : 'Off on this server (ANTHROPIC_API_KEY not set) — the pattern scan still runs.');
+  // 7. Which scan tier this server can provide (never blocks scanning)
+  add('ai', 'Scan tier', aiAvailable() ? 'pass' : 'warn',
+    aiAvailable() ? `Full review by ${modelLabel()}` : "Basic scan only — Claude review isn't configured on this server (ANTHROPIC_API_KEY not set)");
 
   return done({ target: { ...canonical, ref, sha }, info: summarize(info, languages) });
 }

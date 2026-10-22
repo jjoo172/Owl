@@ -50,6 +50,6 @@ console.log('\nHotspots:');
 for (const h of hotspots.slice(0, 8)) console.log(`  ${String(h.weighted).padStart(7)}  ${h.file}${h.kind !== 'production' ? ` (${h.kind})` : ''}`);
 if (ai) {
   console.log(`\nAI review (${ai.model}): ${ai.overall_risk}\n${ai.summary}`);
-} else if (result.aiError) {
-  console.log(`\n${result.aiError}`);
+} else {
+  console.log(`\nBasic scan (pattern matching only): ${result.tierReason}.`);
 }

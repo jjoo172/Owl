@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, extname } from 'node:path';
 import { analyze } from './analyze.js';
 import { aiAvailable } from './ai.js';
-import { checkRepository } from './access.js';
+import { checkRepository, modelLabel } from './access.js';
 import { DailyBudget, clientIdOf, fmtUsd } from './budget.js';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -70,7 +70,7 @@ async function handleScan(req, res) {
     return res.end();
   }
   const target = { owner, repo, ref: typeof ref === 'string' ? ref : undefined, sha };
-  const useAi = Boolean(ai) && aiAvailable();
+  const useAi = ai !== false;
   const key = `${owner}/${repo}@${sha}@${useAi}`.toLowerCase();
 
   const hit = cache.get(key);
@@ -92,7 +92,7 @@ async function handleScan(req, res) {
     const budget = { ledger, clientId: clientIdOf(req) };
     const data = await analyze(target, { ai: useAi, budget, onProgress: (message) => send({ type: 'progress', message }) });
     // Only cache complete results: a review skipped for one visitor's budget mustn't be served to others.
-    if (!data.aiError) cache.set(key, { at: Date.now(), data });
+    if (data.tier === 'full') cache.set(key, { at: Date.now(), data });
     if (cache.size > 50) cache.delete(cache.keys().next().value);
     send({ type: 'result', data });
   } catch (err) {
@@ -139,9 +139,9 @@ function withBudget(result, clientId) {
   const checks = result.checks.map((c) => {
     if (c.id !== 'ai') return c;
     if (left <= 0) {
-      return { ...c, status: 'warn', detail: "Today's Claude review budget is used up (resets at midnight UTC) — the pattern scan still runs." };
+      return { ...c, status: 'warn', detail: "Basic scan only — you've used today's Claude review budget (resets at midnight UTC)" };
     }
-    return { ...c, detail: limit === null ? 'Enabled' : `Enabled — $${fmtUsd(left)} of your $${fmtUsd(limit)} daily budget left` };
+    return { ...c, detail: limit === null ? c.detail : `${c.detail} — $${fmtUsd(left)} of your $${fmtUsd(limit)} daily budget left` };
   });
   return { ...result, checks };
 }
@@ -150,7 +150,7 @@ const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   if (path === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, ai: aiAvailable(), githubToken: Boolean(process.env.GITHUB_TOKEN) }));
+    return res.end(JSON.stringify({ ok: true, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, githubToken: Boolean(process.env.GITHUB_TOKEN) }));
   }
   if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);

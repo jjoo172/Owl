@@ -7,6 +7,16 @@ putting it in your critical code path. It looks **only at source code**
 (`.c`, `.cc`, `.cpp`, `.h`, `.hpp`, …) — READMEs, docs, build scripts and other
 text files are ignored.
 
+## Scan tiers
+
+Every scan is a **full review**: Claude reads the C/C++ source like a security auditor, and its
+findings are merged with a fast pattern scan. If Claude can't run — no `ANTHROPIC_API_KEY`, the
+visitor's daily budget is used up, API credits have run out, the API is rate-limited or
+overloaded (after one automatic retry), or the review times out — Owl falls back to a
+**basic scan** (pattern matching only). The fallback is never silent: step 1 shows which tier
+to expect, and basic results open with a banner giving the reason and what the scan misses.
+Basic results are never cached, so a re-run can get the full review once Claude is available.
+
 ## How it works
 
 Every scan runs in two steps.

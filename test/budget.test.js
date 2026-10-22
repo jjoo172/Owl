@@ -113,7 +113,8 @@ test('when over budget the scan still completes, with a clear note instead of a 
   const ledger = new DailyBudget({ perUserUsd: 0.000001, globalUsd: null });
   const r = await analyze(null, { dir, budget: { ledger, clientId: 'a' } });
   assert.equal(r.ai, null);
-  assert.match(r.aiError, /could cost up to/);
-  assert.doesNotMatch(r.aiError, /failed/);
+  assert.equal(r.tier, 'basic');
+  assert.match(r.tierReason, /could cost up to/);
+  assert.doesNotMatch(r.tierReason, /failed|\.$/);
   assert.ok(r.stats.totalFindings > 0, 'scanner results still returned');
 });

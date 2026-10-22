@@ -19,14 +19,10 @@ let current = null;
 // ---------- setup ----------
 fetch('/api/health')
   .then((r) => r.json())
-  .then(({ ai }) => {
-    if (!ai) {
-      $('#ai').checked = false;
-      $('#ai').disabled = true;
-      const hint = $('#ai-hint');
-      hint.hidden = false;
-      hint.textContent = 'Expert review is off on this server (set ANTHROPIC_API_KEY to enable it). The pattern scan still runs.';
-    }
+  .then(({ ai, model }) => {
+    $('#ai-hint').textContent = ai
+      ? `Every scan is a full review by ${model || 'Claude'}, which reads the source like a security auditor. If Claude is unavailable, Owl falls back to a basic pattern scan and tells you.`
+      : "This server has no Claude API key, so scans run as a basic pattern scan only (set ANTHROPIC_API_KEY to enable full reviews).";
   })
   .catch(() => showError(NO_SERVER_MESSAGE));
 
@@ -47,7 +43,7 @@ if (params.get('repo')) {
 
 form.addEventListener('submit', (e) => {
   e.preventDefault();
-  run($('#repo').value.trim(), $('#ref').value.trim(), $('#ai').checked);
+  run($('#repo').value.trim(), $('#ref').value.trim());
 });
 
 function showError(message) {
@@ -61,7 +57,8 @@ function setStep(n, state, text) {
   el.innerHTML =
     state === 'running' ? `<span class="spinner sm" aria-hidden="true"></span>${esc(text)}` :
     state === 'pass' ? `✓ ${esc(text)}` :
-    state === 'fail' ? `✗ ${esc(text)}` : esc(text || '');
+    state === 'fail' ? `✗ ${esc(text)}` :
+    state === 'warn' ? `! ${esc(text)}` : esc(text || '');
 }
 
 function renderChecks(checks) {
@@ -73,7 +70,7 @@ function renderChecks(checks) {
 }
 
 // ---------- the two steps ----------
-async function run(repo, ref, ai) {
+async function run(repo, ref) {
   if (!repo) return;
   const url = new URL(location.href);
   url.searchParams.set('repo', repo);
@@ -93,7 +90,7 @@ async function run(repo, ref, ai) {
   try {
     const check = await accessCheck(repo, ref);
     if (!check) return;
-    await scan(check.target, ai);
+    await scan(check.target);
   } finally {
     btn.disabled = false;
   }
@@ -133,7 +130,7 @@ async function accessCheck(repo, ref) {
 }
 
 /** Step 2: scan the exact commit the access check confirmed. */
-async function scan(target, ai) {
+async function scan(target) {
   setStep(2, 'running', 'Starting…');
   $('#step2-text').textContent = `Scanning ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`;
   let gotResult = false;
@@ -144,7 +141,7 @@ async function scan(target, ai) {
       res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...target, ai }),
+        body: JSON.stringify(target),
       });
     } catch {
       throw new Error('Lost contact with the Owl server when starting the scan. Try again.');
@@ -188,7 +185,11 @@ async function scan(target, ai) {
           'restarted mid-scan (for example, it ran out of memory on a large repository). Try again, or try a smaller repository.',
       );
     }
-    setStep(2, 'pass', `Done in ${(current.durationMs / 1000).toFixed(1)}s${current.cached ? ' (cached)' : ''}`);
+    setStep(2, current.tier === 'full' ? 'pass' : 'warn',
+      `${current.tier === 'full' ? 'Full review' : 'Basic scan'} · ${(current.durationMs / 1000).toFixed(1)}s${current.cached ? ' (cached)' : ''}`);
+    $('#step2-text').textContent = current.tier === 'full'
+      ? `Claude reviewed ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`
+      : `Claude was unavailable (${current.tierReason}), so this is a basic pattern scan.`;
   } catch (err) {
     setStep(2, 'fail', 'Failed');
     showError(err.message || String(err));
@@ -209,22 +210,28 @@ function locFromString(data, s) {
 
 function render(data) {
   const { repo, stats, risk, ai } = data;
+  const unreviewed = ai ? data.findings.filter((f) => f.source === 'scanner' && !f.verdict).length : 0;
   const level = ai?.overall_risk || risk.level;
   const headline = ['Low', 'Moderate', 'High', 'Critical'].includes(level) ? level : risk.level;
   const sevTotal = SEVERITIES.reduce((s, k) => s + (stats.bySeverity[k] || 0), 0) || 1;
 
   resultsEl.innerHTML = `
+    ${data.tier === 'full' ? '' : `<section class="tier-banner" role="status">
+      <b>Basic scan — lower tier.</b> ${esc(data.tierReason || 'Claude was unavailable')}, so these results come from pattern matching alone.
+      It misses most lifetime, aliasing and concurrency bugs (dangling references, use-after-free, data races), so treat the rating as a lower bound and re-run later for a full review.
+    </section>`}
     <section class="card hero">
       <div class="verdict">
-        <div class="label">Overall risk</div>
+        <div class="label">Overall risk${data.tier === 'full' ? '' : ' (basic scan)'}</div>
         <div class="level lvl-${esc(headline)}">${esc(headline)}</div>
         <div class="meter" title="Scanner score ${risk.score}/100"><div class="bg-${esc(risk.level)}" style="width:${Math.max(4, risk.score)}%"></div></div>
-        <div class="sub" style="margin-top:6px">${ai ? `Claude's assessment · scanner: ${esc(risk.level)} (${risk.score}/100)` : `Scanner score ${risk.score}/100`}</div>
+        <div class="sub" style="margin-top:6px">${ai ? `Claude's assessment · patterns alone: ${esc(risk.level)}` : `Pattern score ${risk.score}/100 — a lower bound`}</div>
       </div>
       <div>
         <div class="repo-line">${repo.url ? `<a href="${esc(repo.url)}" target="_blank" rel="noopener">${esc(repo.owner)}/${esc(repo.name)}</a>` : esc(repo.name)}
           ${repo.ref ? `<span class="pill">${esc(repo.ref)}</span>` : ''}
           ${repo.sha ? `<span class="pill mono">${esc(repo.sha.slice(0, 10))}</span>` : ''}
+          ${data.tier === 'full' ? '<span class="pill claude">Full review</span>' : '<span class="pill warn">Basic scan</span>'}
           ${data.cached ? '<span class="pill">cached</span>' : ''}
         </div>
         <div class="stats">
@@ -246,7 +253,7 @@ function render(data) {
 
     <section class="two-col">
       <div class="card">
-        <h2>Why this rating</h2>
+        <h2>${ai ? 'Pattern scan signals' : 'Why this rating'}</h2>
         <ul class="plain">${risk.rationale.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
         ${renderMitigations(data)}
       </div>
@@ -289,7 +296,8 @@ function render(data) {
           <option value="scanner">Scanner only (not reviewed)</option>
           <option value="dismissed">Dismissed by Claude</option>
         </select>
-        <label><input type="checkbox" id="f-dismissed"> show dismissed</label>` : ''}
+        <label><input type="checkbox" id="f-dismissed"> show dismissed</label>
+        ${unreviewed ? `<label><input type="checkbox" id="f-unreviewed"> show ${fmt(unreviewed)} unreviewed pattern hit${unreviewed === 1 ? '' : 's'}</label>` : ''}` : ''}
         <select id="f-rule"><option value="">All patterns</option>${data.ruleSummary.map((r) => `<option value="${esc(r.ruleId)}">${esc(r.title)}</option>`).join('')}</select>
         <input type="search" id="f-text" placeholder="Filter by path or code…">
       </div>
@@ -342,7 +350,7 @@ function renderAi(data) {
         ${(c.locations || []).length ? `<div class="locs">${c.locations.map((l) => locFromString(data, l)).join('')}</div>` : ''}
       </div>`).join('');
     return `<section class="card">
-      <h2>Expert review</h2>
+      <h2>Claude's review</h2>
       <div class="ai-summary">${paras}</div>
       ${concerns ? `<h3>Top concerns</h3>${concerns}` : ''}
       <div class="two-col" style="margin-top:6px">
@@ -363,7 +371,6 @@ function renderAi(data) {
       } · ${esc(ai.model || '')}${typeof ai.costUsd === 'number' ? ` · cost $${ai.costUsd < 0.01 ? ai.costUsd.toFixed(4) : ai.costUsd.toFixed(2)}` : ''}</p>
     </section>`;
   }
-  if (data.aiError) return `<section class="card"><h2>Expert review</h2><p class="sub">${esc(data.aiError)} The pattern-based results below are still complete.</p></section>`;
   return '';
 }
 
@@ -390,6 +397,8 @@ function wireFindings(data) {
     const tests = $('#f-tests').checked;
     const source = $('#f-source')?.value || '';
     const showDismissed = $('#f-dismissed')?.checked || source === 'dismissed';
+    // On full reviews, pattern hits Claude didn't look at are hidden unless asked for.
+    const showUnreviewed = !data.ai || $('#f-unreviewed')?.checked || source === 'scanner';
     const sourceOf = (f) => (f.source === 'claude' ? 'claude' : f.verdict || 'scanner');
     const rule = $('#f-rule').value;
     const text = $('#f-text').value.trim().toLowerCase();
@@ -400,6 +409,7 @@ function wireFindings(data) {
         (tests || f.kind !== 'test') &&
         (!rule || f.ruleId === rule) &&
         (showDismissed || f.verdict !== 'dismissed') &&
+        (showUnreviewed || f.source !== 'scanner' || f.verdict) &&
         (!source || sourceOf(f) === source) &&
         (!text || `${f.file} ${f.code} ${f.ai?.title || ''} ${f.ai?.detail || ''}`.toLowerCase().includes(text)),
     );
@@ -432,7 +442,7 @@ function wireFindings(data) {
     if (more) more.onclick = () => ((shown += PAGE), apply());
   };
 
-  document.querySelectorAll('#findings-card [data-sev], #f-tests, #f-rule, #f-source, #f-dismissed').forEach((el) => el.addEventListener('change', () => ((shown = PAGE), apply())));
+  document.querySelectorAll('#findings-card [data-sev], #f-tests, #f-rule, #f-source, #f-dismissed, #f-unreviewed').forEach((el) => el.addEventListener('change', () => ((shown = PAGE), apply())));
   $('#f-text').addEventListener('input', () => ((shown = PAGE), apply()));
   apply();
 }

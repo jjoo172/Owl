@@ -168,3 +168,8 @@ tr.rule:hover td { background: var(--panel-2); }
 .ai-note { margin-top: 6px; font-size: 13.5px; color: var(--text); }
 .finding.dismissed { opacity: 0.6; }
 .filters select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 13px; }
+
+/* Scan tier */
+.tier-banner { border: 1px solid rgba(245, 209, 66, 0.45); background: rgba(245, 209, 66, 0.08); color: var(--text); border-radius: 12px; padding: 14px 16px; line-height: 1.5; }
+.tier-banner b { color: var(--medium); }
+.step-state.warn { color: var(--medium); }

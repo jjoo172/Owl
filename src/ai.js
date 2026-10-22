@@ -151,6 +151,29 @@ const REVIEW_TOOL = {
 
 export const DEFAULT_MODEL = 'claude-haiku-5-5';
 
+const REVIEW_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 180_000);
+const RETRY_DELAY_MS = Number(process.env.AI_RETRY_DELAY_MS || 3000);
+const TRANSIENT = new Set([429, 500, 502, 503, 504, 529]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Claude's review couldn't run; `reason` is a plain-language explanation for the user. */
+export class ReviewUnavailableError extends Error {
+  constructor(reason, code) {
+    super(reason);
+    this.code = code;
+  }
+}
+
+function unavailableFromResponse(status, data) {
+  const msg = String(data?.error?.message || '');
+  if (/credit balance/i.test(msg)) return new ReviewUnavailableError("The server's Claude API credits have run out", 'credits');
+  if (status === 401 || status === 403) return new ReviewUnavailableError("The server's Claude API key was rejected", 'auth');
+  if (status === 429) return new ReviewUnavailableError("Claude's API rate limit was reached", 'rate_limit');
+  if (status === 529 || status === 503) return new ReviewUnavailableError('Claude is temporarily overloaded', 'overloaded');
+  return new ReviewUnavailableError(`Claude's API returned an error (${status}${msg ? `: ${msg.slice(0, 120)}` : ''})`, 'api_error');
+}
+
+
 export function buildReviewRequest({ repo, report, allFindings, contentByPath }) {
   const selection = selectSourceForReview(contentByPath, report.hotspots);
   const fullSet = new Set(selection.files);
@@ -219,35 +242,51 @@ export async function aiReview({ budget, ...args }) {
   const reservation = budget ? budget.ledger.reserve(budget.clientId, estimateReviewCost(model, userContent, maxTokens)) : null;
   let actualCost = null; // null = unknown (e.g. timed out after sending): keep the reservation
 
+  const body = JSON.stringify({
+    model,
+    max_tokens: maxTokens,
+    system: SYSTEM_PROMPT,
+    tools: [REVIEW_TOOL],
+    tool_choice: { type: 'tool', name: REVIEW_TOOL.name },
+    messages: [{ role: 'user', content: userContent }],
+  });
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 180_000);
+  const timer = setTimeout(() => controller.abort(), REVIEW_TIMEOUT_MS);
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        system: SYSTEM_PROMPT,
-        tools: [REVIEW_TOOL],
-        tool_choice: { type: 'tool', name: REVIEW_TOOL.name },
-        messages: [{ role: 'user', content: userContent }],
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
+    let res;
+    let data;
+    // One retry for temporary trouble (rate limit, overload, network blip); rejected calls aren't billed.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          signal: controller.signal,
+          headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+          body,
+        });
+      } catch (err) {
+        if (err.name === 'AbortError') throw new ReviewUnavailableError("Claude's review took too long", 'timeout');
+        if (attempt < 2) {
+          await sleep(RETRY_DELAY_MS);
+          continue;
+        }
+        actualCost = 0;
+        throw new ReviewUnavailableError("The server couldn't reach Claude's API", 'network');
+      }
+      data = await res.json().catch(() => ({}));
+      if (res.ok || !TRANSIENT.has(res.status) || attempt >= 2) break;
+      const wait = Math.min(Number(res.headers.get('retry-after')) * 1000 || RETRY_DELAY_MS, 8000);
+      await sleep(wait);
+    }
     if (data.usage) actualCost = costUsd(data.model || model, data.usage.input_tokens || 0, data.usage.output_tokens || 0);
     else if (!res.ok) actualCost = 0; // rejected requests aren't billed
-    if (!res.ok) throw new Error(data?.error?.message || `Anthropic API returned ${res.status}`);
+    if (!res.ok) throw unavailableFromResponse(res.status, data);
     const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === REVIEW_TOOL.name);
     if (!call?.input) {
-      throw new Error(data.stop_reason === 'max_tokens' ? 'Claude\'s review was cut off (output limit reached).' : 'Claude did not return a structured review.');
+      throw new ReviewUnavailableError("Claude's review came back incomplete", 'incomplete');
     }
-    if (data.stop_reason === 'max_tokens') throw new Error('Claude\'s review was cut off (output limit reached); try raising AI_MAX_OUTPUT_TOKENS.');
+    if (data.stop_reason === 'max_tokens') throw new ReviewUnavailableError("Claude's review was cut off before it finished", 'incomplete');
     return {
       review: call.input,
       hits,
