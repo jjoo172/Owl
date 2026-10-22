@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: owl
+    runtime: static
+    buildCommand: echo "No build step"
+    staticPublishPath: ./public
