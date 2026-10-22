@@ -61,6 +61,13 @@ function setStep(n, state, text) {
     state === 'warn' ? `! ${esc(text)}` : esc(text || '');
 }
 
+/** Collapses or expands the access-check details (the header row stays visible). */
+function setStep1Open(open) {
+  $('#step1-toggle').setAttribute('aria-expanded', String(open));
+  $('#step1-body').hidden = !open;
+}
+$('#step1-toggle').addEventListener('click', () => setStep1Open($('#step1-toggle').getAttribute('aria-expanded') !== 'true'));
+
 function renderChecks(checks) {
   const icon = { pass: '✓', warn: '!', fail: '✗' };
   $('#checks').innerHTML = checks
@@ -83,6 +90,7 @@ async function run(repo, ref) {
   stepsEl.hidden = false;
   current = null;
   $('#checks').innerHTML = '';
+  setStep1Open(true);
   $('#step2-text').textContent = 'Starts once the access check passes.';
   setStep(1, 'running', 'Checking…');
   setStep(2, 'idle', 'Waiting');
@@ -125,7 +133,7 @@ async function accessCheck(repo, ref) {
     return null;
   }
   const warns = check.checks.filter((c) => c.status === 'warn').length;
-  setStep(1, 'pass', warns ? `Passed with ${warns} warning${warns > 1 ? 's' : ''}` : 'Passed');
+  setStep(1, 'pass', `${warns ? `Passed with ${warns} warning${warns > 1 ? 's' : ''}` : 'Passed'} · ${check.checks.length} checks`);
   return check;
 }
 
@@ -187,6 +195,7 @@ async function scan(target) {
     }
     setStep(2, current.tier === 'full' ? 'pass' : 'warn',
       `${current.tier === 'full' ? 'Full review' : 'Basic scan'} · ${(current.durationMs / 1000).toFixed(1)}s${current.cached ? ' (cached)' : ''}`);
+    setStep1Open(false); // the checks passed; keep them one click away
     $('#step2-text').textContent = current.tier === 'full'
       ? `Claude reviewed ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`
       : `Claude was unavailable (${current.tierReason}), so this is a basic pattern scan.`;
@@ -249,43 +258,15 @@ function render(data) {
       </div>
     </section>
 
-    ${renderAi(data)}
+    ${renderSummary(data)}
 
-    <section class="two-col">
-      <div class="card">
-        <h2>${ai ? 'Pattern scan signals' : 'Why this rating'}</h2>
-        <ul class="plain">${risk.rationale.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
-        ${renderMitigations(data)}
-      </div>
-      <div class="card">
-        <h2>Hotspot files</h2>
-        ${data.hotspots.length ? `<div class="table-scroll"><table>
-          <thead><tr><th>File</th><th class="num">Hits</th><th class="num">Weight</th></tr></thead>
-          <tbody>${data.hotspots.slice(0, 10).map((h) => `<tr>
-            <td class="mono" style="word-break:break-all">${repo.blobBase ? `<a href="${esc(repo.blobBase + h.file)}" target="_blank" rel="noopener">${esc(h.file)}</a>` : esc(h.file)}
-              ${h.kind !== 'production' ? `<span class="pill">${esc(h.kind)}</span>` : ''}</td>
-            <td class="num">${fmt(h.findings)}</td><td class="num">${h.weighted}</td></tr>`).join('')}</tbody>
-        </table></div>` : '<p class="sub">No risky patterns found.</p>'}
-      </div>
-    </section>
+    ${ai && (ai.top_concerns || []).length ? fold('concerns-card', 'Top concerns', `${fmt(ai.top_concerns.length)} · most severe: ${sevPill(ai.top_concerns[0].severity)}`, renderConcerns(data)) : ''}
 
-    <section class="card">
-      <h2>What was found</h2>
-      <p class="sub">Click a row to filter the findings below.${ai ? ' Rows marked <span class="pill claude">Claude</span> were found by reading the code; the rest are scanner patterns.' : ''}</p>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Severity</th><th>Issue</th><th class="hide-sm">CWE</th><th class="num">Non-test</th><th class="num">Total</th><th class="num hide-sm">Files</th></tr></thead>
-        <tbody>${data.ruleSummary.map((r) => `<tr class="rule" data-rule="${esc(r.ruleId)}" title="${esc(r.description)}">
-          <td><span class="sev sev-${r.severity}">${r.severity}</span></td>
-          <td><b>${esc(r.title)}</b> ${r.source === 'claude' ? '<span class="pill claude">Claude</span>' : ''}
-            <div class="sub">${esc(r.description)}${r.confirmed ? ` · ${fmt(r.confirmed)} confirmed by Claude` : ''}${r.dismissed ? ` · ${fmt(r.dismissed)} dismissed by Claude` : ''}</div></td>
-          <td class="hide-sm mono">${/^CWE-\d+$/.test(r.cwe || '') ? `<a href="https://cwe.mitre.org/data/definitions/${esc(r.cwe.replace('CWE-', ''))}.html" target="_blank" rel="noopener">${esc(r.cwe)}</a>` : esc(r.cwe || '')}</td>
-          <td class="num">${fmt(r.productionCount)}</td><td class="num">${fmt(r.count)}</td><td class="num hide-sm">${fmt(r.files)}</td>
-        </tr>`).join('') || '<tr><td colspan="6" class="sub">Nothing flagged.</td></tr>'}</tbody>
-      </table></div>
-    </section>
+    ${ai && (ai.recommendations || []).length ? fold('recs-card', 'Before adopting', `${fmt(ai.recommendations.length)} recommendation${ai.recommendations.length === 1 ? '' : 's'}`,
+      `<ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
 
-    <section class="card" id="findings-card">
-      <h2>Findings</h2>
+    ${fold('findings-card', 'Findings', '<span id="findings-count"></span>', `
+      ${ai?.counts ? `<p class="sub" style="margin-top:0">Claude added ${fmt(ai.counts.added)} finding${ai.counts.added === 1 ? '' : 's'} the scanner can't detect, confirmed ${fmt(ai.counts.confirmed)} scanner hit${ai.counts.confirmed === 1 ? '' : 's'} (setting their severity) and dismissed ${fmt(ai.counts.dismissed)} as safe in context.${ai.counts.unverifiedLocations ? ` ${fmt(ai.counts.unverifiedLocations)} cited a location that doesn't exist (shown, not counted).` : ''}</p>` : ''}
       <div class="filters">
         ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" ${s === 'low' && data.findings.some((f) => f.severity !== 'low') ? '' : 'checked'}> <span class="sev sev-${s}">${s}</span></label>`).join('')}
         <label><input type="checkbox" id="f-tests"> include test / example code</label>
@@ -298,12 +279,38 @@ function render(data) {
         </select>
         <label><input type="checkbox" id="f-dismissed"> show dismissed</label>
         ${unreviewed ? `<label><input type="checkbox" id="f-unreviewed"> show ${fmt(unreviewed)} unreviewed pattern hit${unreviewed === 1 ? '' : 's'}</label>` : ''}` : ''}
-        <select id="f-rule"><option value="">All patterns</option>${data.ruleSummary.map((r) => `<option value="${esc(r.ruleId)}">${esc(r.title)}</option>`).join('')}</select>
+        <select id="f-rule"><option value="">All issue types</option>${data.ruleSummary.map((r) => `<option value="${esc(r.ruleId)}">${esc(r.title)}</option>`).join('')}</select>
         <input type="search" id="f-text" placeholder="Filter by path or code…">
       </div>
       <div id="findings-list"></div>
-      ${stats.findingsTruncated ? `<p class="sub">Showing the first ${fmt(data.findings.length)} findings (most severe first).</p>` : ''}
-    </section>
+      ${stats.findingsTruncated ? `<p class="sub">Showing the first ${fmt(data.findings.length)} findings (most severe first).</p>` : ''}`)}
+
+    ${fold('types-card', 'Issue types', `${fmt(data.ruleSummary.length)} type${data.ruleSummary.length === 1 ? '' : 's'}`, `
+      <p class="sub" style="margin-top:0">Click a row to see its findings.${ai ? ' Rows marked <span class="pill claude">Claude</span> were found by reading the code; the rest are scanner patterns.' : ''}</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Severity</th><th>Issue</th><th class="hide-sm">CWE</th><th class="num">Non-test</th><th class="num">Total</th><th class="num hide-sm">Files</th></tr></thead>
+        <tbody>${data.ruleSummary.map((r) => `<tr class="rule" data-rule="${esc(r.ruleId)}" title="${esc(r.description)}">
+          <td><span class="sev sev-${r.severity}">${r.severity}</span></td>
+          <td><b>${esc(r.title)}</b> ${r.source === 'claude' ? '<span class="pill claude">Claude</span>' : ''}
+            <div class="sub">${esc(r.description)}${r.confirmed ? ` · ${fmt(r.confirmed)} confirmed by Claude` : ''}${r.dismissed ? ` · ${fmt(r.dismissed)} dismissed by Claude` : ''}</div></td>
+          <td class="hide-sm mono">${/^CWE-\d+$/.test(r.cwe || '') ? `<a href="https://cwe.mitre.org/data/definitions/${esc(r.cwe.replace('CWE-', ''))}.html" target="_blank" rel="noopener">${esc(r.cwe)}</a>` : esc(r.cwe || '')}</td>
+          <td class="num">${fmt(r.productionCount)}</td><td class="num">${fmt(r.count)}</td><td class="num hide-sm">${fmt(r.files)}</td>
+        </tr>`).join('') || '<tr><td colspan="6" class="sub">Nothing flagged.</td></tr>'}</tbody>
+      </table></div>`)}
+
+    ${fold('hotspots-card', 'Hotspot files', data.hotspots.length ? `${fmt(Math.min(10, data.hotspots.length))} file${data.hotspots.length === 1 ? '' : 's'} · top: <code>${esc(data.hotspots[0].file.split('/').pop())}</code>` : 'none',
+      data.hotspots.length ? `<div class="table-scroll"><table>
+          <thead><tr><th>File</th><th class="num">Findings</th><th class="num">Weight</th></tr></thead>
+          <tbody>${data.hotspots.slice(0, 10).map((h) => `<tr>
+            <td class="mono" style="word-break:break-all">${repo.blobBase ? `<a href="${esc(repo.blobBase + h.file)}" target="_blank" rel="noopener">${esc(h.file)}</a>` : esc(h.file)}
+              ${h.kind !== 'production' ? `<span class="pill">${esc(h.kind)}</span>` : ''}</td>
+            <td class="num">${fmt(h.findings)}</td><td class="num">${h.weighted}</td></tr>`).join('')}</tbody>
+        </table></div>` : '<p class="sub">No risky patterns found.</p>')}
+
+    ${ai
+      ? fold('signals-card', 'Pattern scan signals', `patterns alone rate it ${esc(risk.level)}`,
+          `<ul class="plain">${risk.rationale.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>${renderMitigations(data)}`)
+      : fold('signals-card', 'Safer-idiom signals', `${fmt(Object.keys(data.mitigations || {}).length)} found`, renderMitigations(data, false))}
 
     <section class="actions">
       <button id="dl-json" type="button">Download full report (JSON)</button>
@@ -334,47 +341,55 @@ function render(data) {
       const sev = data.ruleSummary.find((r) => r.ruleId === rule)?.severity;
       if (sev) $(`[data-sev="${sev}"]`).checked = true;
       $('#f-rule').dispatchEvent(new Event('change'));
+      $('#findings-card').open = true;
       $('#findings-card').scrollIntoView({ behavior: 'smooth' });
     }),
   );
 }
 
-function renderAi(data) {
-  if (data.ai) {
-    const ai = data.ai;
-    const paras = String(ai.summary || '').split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('');
-    const concerns = (ai.top_concerns || []).map((c) => `
-      <div class="concern ${esc(c.severity)}">
-        <div class="t"><span class="sev sev-${esc(c.severity)}">${esc(c.severity)}</span> ${esc(c.title)}</div>
-        <div>${esc(c.detail)}</div>
-        ${(c.locations || []).length ? `<div class="locs">${c.locations.map((l) => locFromString(data, l)).join('')}</div>` : ''}
-      </div>`).join('');
-    return `<section class="card">
-      <h2>Claude's review</h2>
-      <div class="ai-summary">${paras}</div>
-      ${concerns ? `<h3>Top concerns</h3>${concerns}` : ''}
-      <div class="two-col" style="margin-top:6px">
-        ${(ai.recommendations || []).length ? `<div><h3>Before adopting</h3><ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></div>` : ''}
-        ${ai.counts ? `<div><h3>How Claude changed the results</h3><ul class="plain">
-          <li>${fmt(ai.counts.added)} new finding${ai.counts.added === 1 ? '' : 's'} the scanner can't detect</li>
-          <li>${fmt(ai.counts.confirmed)} scanner hit${ai.counts.confirmed === 1 ? '' : 's'} confirmed (severity set by Claude)</li>
-          <li>${fmt(ai.counts.dismissed)} scanner hit${ai.counts.dismissed === 1 ? '' : 's'} dismissed as safe in context</li>
-          ${ai.counts.unverifiedLocations ? `<li>${fmt(ai.counts.unverifiedLocations)} cited a location that doesn't exist — shown, but not counted</li>` : ''}
-        </ul></div>` : ''}
-      </div>
-      <p class="sub">${
-        ai.coverage
-          ? ai.coverage.mode === 'full'
-            ? `Claude read all ${fmt(ai.coverage.totalFiles)} non-test source files in full`
-            : `Claude read ${fmt(ai.coverage.filesInFull)} of ${fmt(ai.coverage.totalFiles)} non-test source files in full (highest-risk first)${ai.coverage.excerpts ? ` plus ${fmt(ai.coverage.excerpts)} excerpts` : ''}`
-          : ''
-      } · ${esc(ai.model || '')}${typeof ai.costUsd === 'number' ? ` · cost $${ai.costUsd < 0.01 ? ai.costUsd.toFixed(4) : ai.costUsd.toFixed(2)}` : ''}</p>
-    </section>`;
-  }
-  return '';
+/** A collapsible results section: a clear one-line header with a count, details on click. */
+function fold(id, title, meta, body, open = false) {
+  return `<details class="card fold" id="${id}"${open ? ' open' : ''}>
+    <summary><span class="fold-title">${esc(title)}</span><span class="fold-meta">${meta}</span><span class="chev" aria-hidden="true"></span></summary>
+    <div class="fold-body">${body}</div>
+  </details>`;
 }
 
-function renderMitigations(data) {
+const sevPill = (s) => `<span class="sev sev-${esc(s)}">${esc(s)}</span>`;
+
+/** Always-visible summary: Claude's assessment on full reviews, the rating rationale on basic scans. */
+function renderSummary(data) {
+  const ai = data.ai;
+  if (!ai) {
+    return `<section class="card summary">
+      <h2>Summary</h2>
+      <ul class="plain">${data.risk.rationale.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+    </section>`;
+  }
+  const paras = String(ai.summary || '').split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('');
+  const cov = ai.coverage
+    ? ai.coverage.mode === 'full'
+      ? `Claude read all ${fmt(ai.coverage.totalFiles)} non-test source files in full`
+      : `Claude read ${fmt(ai.coverage.filesInFull)} of ${fmt(ai.coverage.totalFiles)} non-test source files in full (highest-risk first)${ai.coverage.excerpts ? ` plus ${fmt(ai.coverage.excerpts)} excerpts` : ''}`
+    : '';
+  const cost = typeof ai.costUsd === 'number' ? ` · cost $${ai.costUsd < 0.01 ? ai.costUsd.toFixed(4) : ai.costUsd.toFixed(2)}` : '';
+  return `<section class="card summary">
+    <h2>Summary</h2>
+    <div class="ai-summary">${paras}</div>
+    <p class="sub">${cov} · ${esc(ai.model || '')}${cost}. Open the sections below for details.</p>
+  </section>`;
+}
+
+function renderConcerns(data) {
+  return (data.ai.top_concerns || []).map((c) => `
+    <div class="concern ${esc(c.severity)}">
+      <div class="t">${sevPill(c.severity)} ${esc(c.title)}</div>
+      <div>${esc(c.detail)}</div>
+      ${(c.locations || []).length ? `<div class="locs">${c.locations.map((l) => locFromString(data, l)).join('')}</div>` : ''}
+    </div>`).join('');
+}
+
+function renderMitigations(data, heading = true) {
   const labels = {
     'smart-pointers': 'Smart pointers',
     'safe-views': 'span / string_view',
@@ -383,8 +398,9 @@ function renderMitigations(data) {
     'fuzz-harness': 'Fuzz harnesses',
   };
   const entries = Object.entries(data.mitigations || {});
-  if (!entries.length) return '<h3>Safer-idiom signals</h3><p class="sub">None detected.</p>';
-  return `<h3>Safer-idiom signals</h3><ul class="plain">${entries.map(([k, v]) => `<li>${esc(labels[k] || k)}: ${fmt(v)}</li>`).join('')}</ul>`;
+  const h = heading ? '<h3>Safer-idiom signals</h3>' : '';
+  if (!entries.length) return `${h}<p class="sub">None detected.</p>`;
+  return `${h}<ul class="plain">${entries.map(([k, v]) => `<li>${esc(labels[k] || k)}: ${fmt(v)}</li>`).join('')}</ul>`;
 }
 
 function wireFindings(data) {
@@ -413,6 +429,9 @@ function wireFindings(data) {
         (!source || sourceOf(f) === source) &&
         (!text || `${f.file} ${f.code} ${f.ai?.title || ''} ${f.ai?.detail || ''}`.toLowerCase().includes(text)),
     );
+    const live = items.filter((f) => f.verdict !== 'dismissed' && f.locationVerified !== false);
+    const bySev = SEVERITIES.map((s) => [s, live.filter((f) => f.severity === s).length]).filter(([, n]) => n);
+    $('#findings-count').innerHTML = `${fmt(live.length)} shown${bySev.length ? ' · ' + bySev.map(([s, n]) => `${sevPill(s)} ${fmt(n)}`).join(' ') : ''}`;
     list.innerHTML =
       (items.length ? '' : '<p class="sub">No findings match these filters.</p>') +
       items

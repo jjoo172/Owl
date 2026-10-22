@@ -173,3 +173,28 @@ tr.rule:hover td { background: var(--panel-2); }
 .tier-banner { border: 1px solid rgba(245, 209, 66, 0.45); background: rgba(245, 209, 66, 0.08); color: var(--text); border-radius: 12px; padding: 14px 16px; line-height: 1.5; }
 .tier-banner b { color: var(--medium); }
 .step-state.warn { color: var(--medium); }
+
+/* Collapsible access check */
+.step-toggle { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: flex; align-items: center; gap: 10px; border-radius: 8px; }
+.step-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.step-toggle:hover b { color: var(--accent); }
+.chev { width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); transition: transform 0.15s; flex: none; margin: 0 4px 0 2px; }
+.step-toggle[aria-expanded="true"] .chev { transform: rotate(45deg); }
+
+/* Collapsible result sections */
+.fold { padding: 0; }
+.fold > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-radius: 14px; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary:hover .fold-title { color: var(--accent); }
+.fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fold-title { font-weight: 650; font-size: 16px; }
+.fold-meta { color: var(--muted); font-size: 13px; margin-left: auto; text-align: right; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
+.fold[open] > summary .chev { transform: rotate(45deg); }
+.fold-body { padding: 0 20px 20px; border-top: 1px solid var(--line); padding-top: 14px; }
+.summary h2 { display: flex; align-items: center; gap: 8px; }
+.summary { border-color: rgba(245, 185, 66, 0.35); }
+.summary .ai-summary p:last-child { margin-bottom: 0; }
+@media (max-width: 760px) {
+  .fold > summary { flex-wrap: wrap; }
+  .fold-meta { margin-left: 0; width: 100%; justify-content: flex-start; text-align: left; order: 3; }
+}

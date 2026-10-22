@@ -49,9 +49,13 @@
 
     <section id="steps" class="card steps" hidden aria-live="polite">
       <div class="step" id="step1">
-        <div class="step-head"><span class="step-num">1</span><b>Access check</b><span class="step-state" id="step1-state"></span></div>
-        <p class="sub step-note">Confirms the repository is public, the branch exists and its source can be downloaded — before any scanning starts.</p>
-        <ul class="checks" id="checks"></ul>
+        <button type="button" class="step-head step-toggle" id="step1-toggle" aria-expanded="true" aria-controls="step1-body">
+          <span class="step-num">1</span><b>Access check</b><span class="step-state" id="step1-state"></span><span class="chev" aria-hidden="true"></span>
+        </button>
+        <div class="step-body" id="step1-body">
+          <p class="sub step-note">Confirms the repository is public, the branch exists and its source can be downloaded — before any scanning starts.</p>
+          <ul class="checks" id="checks"></ul>
+        </div>
       </div>
       <div class="step" id="step2">
         <div class="step-head"><span class="step-num">2</span><b>Scan</b><span class="step-state" id="step2-state"></span></div>
