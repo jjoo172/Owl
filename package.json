@@ -1,0 +1,15 @@
+{
+  "name": "owl",
+  "version": "1.0.0",
+  "description": "Owl: memory-safety risk scanner for C/C++ GitHub repositories",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "scan": "node src/cli.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

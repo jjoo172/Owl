@@ -3,22 +3,68 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hello, World</title>
-  <style>
-    html, body { height: 100%; margin: 0; }
-    body {
-      display: grid; place-items: center;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      background: #0f172a; color: #f8fafc;
-    }
-    h1 { font-size: clamp(2.5rem, 8vw, 5rem); margin: 0; letter-spacing: -0.02em; }
-    p { text-align: center; color: #94a3b8; }
-  </style>
+  <title>Owl — C/C++ memory-safety risk scanner</title>
+  <meta name="description" content="Scan a GitHub C/C++ repository for memory-unsafe code and get an overall risk rating before adding it to your critical path.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div>
-    <h1>Hello, World! 👋</h1>
-    <p>Served from Render.</p>
-  </div>
+  <header class="top">
+    <div class="wrap brand">
+      <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+        <path d="M10 14 L20 22 Q32 16 44 22 L54 14 L52 34 Q50 54 32 58 Q14 54 12 34 Z" fill="var(--owl)"/>
+        <circle cx="23" cy="32" r="8" fill="var(--bg)"/><circle cx="41" cy="32" r="8" fill="var(--bg)"/>
+        <circle cx="23" cy="32" r="3.5" fill="var(--accent)"/><circle cx="41" cy="32" r="3.5" fill="var(--accent)"/>
+        <path d="M29 40 L32 45 L35 40 Z" fill="var(--accent)"/>
+      </svg>
+      <div>
+        <h1>Owl</h1>
+        <p class="tag">Memory-safety risk scanner for C/C++ repositories</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="intro">
+      <p>Point Owl at a GitHub repository. It reads <strong>only the C/C++ source</strong> (docs and other text files are ignored), flags memory-unsafe patterns — unbounded copies, format strings, manual lifetimes, integer-overflowing allocations and more — and rates the risk of putting that code in your critical path.</p>
+    </section>
+
+    <form id="scan-form" class="scan-form" autocomplete="off">
+      <label class="field grow">
+        <span>Repository</span>
+        <input id="repo" name="repo" placeholder="owner/repo or https://github.com/owner/repo" required spellcheck="false">
+      </label>
+      <label class="field ref">
+        <span>Branch / tag / commit <em>(optional)</em></span>
+        <input id="ref" name="ref" placeholder="default branch" spellcheck="false">
+      </label>
+      <button id="scan-btn" type="submit">Scan</button>
+      <label class="toggle" id="ai-toggle-wrap">
+        <input type="checkbox" id="ai" checked>
+        <span>Expert review with Claude</span>
+      </label>
+      <p class="hint" id="ai-hint" hidden></p>
+      <p class="examples">Try:
+        <button type="button" class="link" data-repo="madler/zlib">madler/zlib</button>
+        <button type="button" class="link" data-repo="antirez/kilo">antirez/kilo</button>
+        <button type="button" class="link" data-repo="nlohmann/json">nlohmann/json</button>
+      </p>
+    </form>
+
+    <section id="status" class="status" hidden aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <span id="status-text">Starting…</span>
+    </section>
+
+    <section id="error" class="error" hidden role="alert"></section>
+
+    <section id="results" hidden></section>
+  </main>
+
+  <footer class="wrap foot">
+    Pattern matching finds <em>candidates</em>, not confirmed bugs — treat findings as a review checklist.
+  </footer>
+
+  <script src="app.js" type="module"></script>
 </body>
 </html>

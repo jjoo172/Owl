@@ -1,6 +1,17 @@
 services:
   - type: web
-    name: owl
-    runtime: static
-    buildCommand: echo "No build step"
-    staticPublishPath: ./public
+    name: owl-scanner
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Enables the expert review step (Claude). Leave empty to run pattern scanning only.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Optional: raises GitHub's download rate limit from 60/hour to 5,000/hour.
+      - key: GITHUB_TOKEN
+        sync: false
