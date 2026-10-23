@@ -240,8 +240,6 @@ function render(data) {
   const headline = ['Low', 'Moderate', 'High', 'Critical'].includes(risk.level) ? risk.level : 'Moderate';
   const meterPct = full ? { Low: 20, Moderate: 45, High: 70, Critical: 95 }[headline] : Math.max(4, risk.score);
   const sevTotal = SEVERITIES.reduce((s, k) => s + (stats.bySeverity[k] || 0), 0) || 1;
-  const noun = full ? 'vulnerabilit' : 'pattern hit';
-  const plural = (n) => (full ? (n === 1 ? 'y' : 'ies') : n === 1 ? '' : 's');
 
   resultsEl.innerHTML = `
     ${full ? '' : `<section class="tier-banner" role="status">
@@ -287,9 +285,6 @@ function render(data) {
 
     ${full && (ai.top_concerns || []).length ? fold('concerns-card', 'Top concerns', `${fmt(ai.top_concerns.length)} · most severe: ${sevPill(ai.top_concerns[0].severity)}`, renderConcerns(data)) : ''}
 
-    ${full && (ai.recommendations || []).length ? fold('recs-card', 'Before adopting', `${fmt(ai.recommendations.length)} recommendation${ai.recommendations.length === 1 ? '' : 's'}`,
-      `<ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
-
     ${fold('findings-card', full ? 'All vulnerabilities' : 'Pattern hits', '<span id="findings-count"></span>', `
       <div class="filters">
         ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" checked> <span class="sev sev-${s}">${s}</span></label>`).join('')}
@@ -312,15 +307,6 @@ function render(data) {
         </tr>`).join('') || `<tr><td colspan="5" class="sub">${full ? 'Claude reported no vulnerabilities in the code it reviewed.' : 'No risky patterns found.'}</td></tr>`}</tbody>
       </table></div>`)}
 
-    ${fold('hotspots-card', 'Riskiest files', data.hotspots.length ? `${fmt(Math.min(10, data.hotspots.length))} file${data.hotspots.length === 1 ? '' : 's'} · top: <code>${esc(data.hotspots[0].file.split('/').pop())}</code>` : 'none',
-      data.hotspots.length ? `<div class="table-scroll"><table>
-          <thead><tr><th>File</th><th>By severity</th><th class="num">Count</th></tr></thead>
-          <tbody>${data.hotspots.slice(0, 10).map((h) => `<tr>
-            <td class="mono" style="word-break:break-all">${repo.blobBase ? `<a href="${esc(repo.blobBase + h.file)}" target="_blank" rel="noopener">${esc(h.file)}</a>` : esc(h.file)}
-              ${h.kind !== 'production' ? `<span class="pill">${esc(h.kind)}</span>` : ''}</td>
-            <td>${SEVERITIES.filter((s) => h.bySeverity?.[s]).map((s) => `${sevPill(s)} ${h.bySeverity[s]}`).join(' ')}</td>
-            <td class="num">${fmt(h.findings)}</td></tr>`).join('')}</tbody>
-        </table></div>` : `<p class="sub">No ${noun}${plural(0)} found.</p>`)}
 
     ${cov.notReviewed.length ? fold('notreviewed-card', 'Not reviewed', `${fmt(cov.notReviewed.length)} file${cov.notReviewed.length === 1 ? '' : 's'}`, renderNotReviewed(data, cov)) : ''}
 
