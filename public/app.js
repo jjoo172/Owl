@@ -290,8 +290,6 @@ function render(data) {
     ${full && (ai.recommendations || []).length ? fold('recs-card', 'Before adopting', `${fmt(ai.recommendations.length)} recommendation${ai.recommendations.length === 1 ? '' : 's'}`,
       `<ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
 
-    ${renderPatchCard(data)}
-
     ${fold('findings-card', full ? 'All vulnerabilities' : 'Pattern hits', '<span id="findings-count"></span>', `
       <div class="filters">
         ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" checked> <span class="sev sev-${s}">${s}</span></label>`).join('')}
@@ -331,6 +329,8 @@ function render(data) {
       <button id="dl-json" type="button">Download full report (JSON)</button>
       <button id="copy-link" type="button">Copy link to this scan</button>
     </section>
+
+    ${renderPatchCard(data)}
   `;
 
   resultsEl.hidden = false;
