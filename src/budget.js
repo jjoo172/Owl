@@ -24,6 +24,22 @@ export function costUsd(model, inputTokens, outputTokens) {
   return (inputTokens * tier.input + outputTokens * tier.output) / 1_000_000;
 }
 
+/**
+ * Cost of one API response from its reported `usage`, including prompt caching:
+ * cache writes at 1.25x the input rate, cache reads at 0.1x (Sonnet/Opus 5.5 reads are 0.05x;
+ * 0.1x overestimates slightly, which is the safe direction for a budget).
+ */
+export function usageCostUsd(model, usage = {}) {
+  const input = usage.input_tokens || 0;
+  const write = usage.cache_creation_input_tokens || 0;
+  const read = usage.cache_read_input_tokens || 0;
+  const output = usage.output_tokens || 0;
+  const promptTokens = input + write + read; // Haiku 5.5's price tier depends on the whole prompt
+  const entry = RATES.find((r) => String(model || '').startsWith(r.prefix));
+  const tier = entry ? entry.tiers.find((t) => t.upTo === undefined || promptTokens <= t.upTo) : FALLBACK;
+  return (input * tier.input + write * tier.input * 1.25 + read * tier.input * 0.1 + output * tier.output) / 1_000_000;
+}
+
 const envUsd = (name, fallback) => {
   const v = process.env[name];
   if (v === undefined || v === '') return fallback;

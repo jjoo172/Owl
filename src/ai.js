@@ -121,7 +121,7 @@ export class ReviewUnavailableError extends Error {
   }
 }
 
-function unavailableFromResponse(status, data) {
+export function unavailableFromResponse(status, data) {
   const msg = String(data?.error?.message || '');
   if (/credit balance/i.test(msg)) return new ReviewUnavailableError("The server's Claude API credits have run out", 'credits');
   if (status === 401 || status === 403) return new ReviewUnavailableError("The server's Claude API key was rejected", 'auth');

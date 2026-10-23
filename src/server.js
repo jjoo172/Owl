@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, extname } from 'node:path';
 import { analyze } from './analyze.js';
-import { aiAvailable } from './ai.js';
+import { aiAvailable, ReviewUnavailableError } from './ai.js';
+import { createHash } from 'node:crypto';
+import { fetchSourceFiles } from './github.js';
+import { runPatchAgent, patchModel } from './patcher.js';
 import { checkRepository, modelLabel } from './access.js';
 import { DailyBudget, clientIdOf, fmtUsd } from './budget.js';
 
@@ -106,6 +109,70 @@ async function handleScan(req, res) {
   }
 }
 
+// Opt-in patch workflow: a separate security-engineer agent proposes patches for the
+// vulnerabilities from a scan. Streams progress like /api/scan, then one result.
+const MAX_CONCURRENT_PATCHES = Number(process.env.MAX_CONCURRENT_PATCHES || 1);
+let activePatches = 0;
+const patchCache = new Map(); // key -> { at, data }
+
+async function handlePatch(req, res) {
+  const send = (obj) => res.write(JSON.stringify(obj) + '\n');
+  const fail = (status, message) => {
+    res.writeHead(status, { 'Content-Type': 'application/x-ndjson' });
+    send({ type: 'error', message });
+    res.end();
+  };
+  let input;
+  try {
+    input = await readJson(req, 300_000);
+  } catch {
+    return fail(400, 'Bad request');
+  }
+  const { owner, repo, sha, ref, findings } = input;
+  if (!/^[\w.-]+$/.test(owner || '') || !/^[\w.-]+$/.test(repo || '') || !/^[0-9a-f]{40}$/.test(sha || '')) {
+    return fail(400, 'Patch requests need the owner, repo and commit of a scan.');
+  }
+  if (!Array.isArray(findings) || !findings.length) return fail(400, 'There are no vulnerabilities to patch.');
+  if (!aiAvailable()) return fail(503, "Proposing patches needs Claude, which isn't configured on this server.");
+
+  const key = `${owner}/${repo}@${sha}#${createHash('sha256').update(JSON.stringify(findings)).digest('hex').slice(0, 16)}`.toLowerCase();
+  const hit = patchCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+    send({ type: 'result', data: { ...hit.data, cached: true } });
+    return res.end();
+  }
+  if (activePatches >= MAX_CONCURRENT_PATCHES) return fail(429, 'The patch agent is busy with another repository. Try again in a few minutes.');
+
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  activePatches++;
+  const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
+  try {
+    send({ type: 'progress', message: `Downloading ${owner}/${repo} @ ${sha.slice(0, 10)}` });
+    const { files } = await fetchSourceFiles({ owner, repo, sha });
+    const contentByPath = new Map(files.map((f) => [f.path, f.content]));
+    const data = await runPatchAgent({
+      repo: { owner, repo, sha, ref },
+      contentByPath,
+      rawFindings: findings,
+      budget: { ledger, clientId: clientIdOf(req) },
+      onProgress: (ev) => send({ type: 'progress', ...ev }),
+    });
+    if (data.patches.length && !data.stoppedReason) {
+      patchCache.set(key, { at: Date.now(), data });
+      if (patchCache.size > 20) patchCache.delete(patchCache.keys().next().value);
+    }
+    send({ type: 'result', data });
+  } catch (err) {
+    if (!(err instanceof ReviewUnavailableError) && !err.status) console.error('patch failed', `${owner}/${repo}@${sha}`, err);
+    send({ type: 'error', message: err instanceof ReviewUnavailableError || err.status ? err.message : 'Something went wrong while proposing patches.' });
+  } finally {
+    clearInterval(heartbeat);
+    activePatches--;
+    res.end();
+  }
+}
+
 // Step 1: is the repository readable? Plain JSON, no scanning.
 const checkCache = new Map(); // short-lived, saves GitHub API quota on repeat checks
 async function handleCheck(req, res) {
@@ -151,10 +218,11 @@ const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   if (path === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, githubToken: Boolean(process.env.GITHUB_TOKEN) }));
+    return res.end(JSON.stringify({ ok: true, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, patchModel: aiAvailable() ? modelLabel(patchModel()) : null, githubToken: Boolean(process.env.GITHUB_TOKEN) }));
   }
   if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);
+  if (path === '/api/patch' && req.method === 'POST') return handlePatch(req, res);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
   res.writeHead(405).end();
 });

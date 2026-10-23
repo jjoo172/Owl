@@ -38,6 +38,30 @@ files are read (`.c`, `.cc`, `.cpp`, `.h`, `.hpp`, …); docs and other text fil
 
 Findings come from an automated review (Claude, or pattern matching on a basic scan) — verify each one before acting on it.
 
+## Proposing patches (opt-in)
+
+After a scan, **Propose patches** starts a separate agentic workflow. It never runs unless the user
+clicks it. A new Claude agent, seeded with the identity of an expert security software engineer
+well-versed in writing secure and memory-safe code, works through the selected vulnerabilities
+(critical and high by default; or add medium, or all):
+
+1. It explores the code with read-only tools (`read_file`, `search_code`) to understand each bug:
+   callers, buffer sizes, ownership and lifetimes.
+2. It fixes each one with `propose_patch`: exact text edits that Owl validates (the old text must
+   match exactly one place) and applies to an in-memory copy of the source. A rejected edit is
+   returned to the agent to correct. It marks false positives and redesign-sized problems with
+   `skip_finding`, then calls `finish` with notes for maintainers.
+3. Owl assembles a unified diff of every accepted change. The page shows each patch, the
+   vulnerabilities it fixes and why, with its diff, and offers a `.patch` download that applies with
+   `git apply` from the repository root.
+
+Owl never pushes or opens pull requests: the person reviews, builds and tests the patch themselves.
+Tools are strict (schema-validated by the API), turns use prompt caching, and every turn's cost
+is reserved against the visitor's daily Claude budget first. A session stops early, keeping its
+completed patches, at 40 steps, a $2 session cap, 10 minutes, or when the daily budget runs out.
+
+CLI: `node src/cli.js owner/repo --patch [--out file.patch]`.
+
 ## Run locally
 
 Requires Node 20+. No dependencies.
@@ -86,6 +110,6 @@ are kept in memory, so they also reset when the service restarts or sleeps, and 
 best-effort (edge headers first; override with `CLIENT_IP_HEADER`). Keep a spend limit on the API
 key's Console workspace as the hard backstop.
 
-Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `AI_SOURCE_BUDGET_CHARS`
+Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `PATCH_MODEL` (model for the patch agent; defaults to `ANTHROPIC_MODEL`), `PATCH_JOB_BUDGET_USD` (default 2), `PATCH_MAX_TURNS` (default 40), `PATCH_MAX_FINDINGS` (default 40), `MAX_CONCURRENT_PATCHES` (default 1), `AI_SOURCE_BUDGET_CHARS`
 (default 150000), `AI_MAX_OUTPUT_TOKENS` (default 8000), `MAX_TARBALL_MB`
 (default 300), `MAX_SOURCE_FILES` (default 25000), `MAX_CONCURRENT_SCANS` (default 2).

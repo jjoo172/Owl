@@ -15,11 +15,14 @@ const NO_SERVER_MESSAGE =
   'served by a static site; open the "owl-scanner" web service deployed from render.yaml instead.';
 
 let current = null;
+let server = { ai: false, patchModel: null };
+let patchRun = 0; // bumps on every new scan or patch request, so stale streams are ignored
 
 // ---------- setup ----------
 fetch('/api/health')
   .then((r) => r.json())
-  .then(({ ai, model }) => {
+  .then(({ ai, model, patchModel }) => {
+    server = { ai, patchModel };
     $('#ai-hint').textContent = ai
       ? `Every scan is a full review by ${model || 'Claude'}, which reads the source like a security auditor. If Claude is unavailable, Owl falls back to a basic pattern scan and tells you.`
       : "This server has no Claude API key, so scans run as a basic pattern scan only (set ANTHROPIC_API_KEY to enable full reviews).";
@@ -89,6 +92,7 @@ async function run(repo, ref) {
   resultsEl.hidden = true;
   stepsEl.hidden = false;
   current = null;
+  patchRun++;
   $('#checks').innerHTML = '';
   setStep1Open(true);
   $('#step2-text').textContent = 'Starts once the access check passes.';
@@ -209,6 +213,11 @@ async function scan(target) {
 }
 
 // ---------- rendering ----------
+function fileLink(data, file) {
+  if (!data.repo.blobBase) return `<code>${esc(file)}</code>`;
+  return `<a class="mono" href="${esc(data.repo.blobBase + file.split('/').map(encodeURIComponent).join('/'))}" target="_blank" rel="noopener">${esc(file)}</a>`;
+}
+
 function locLink(data, file, line) {
   const label = `${file}:${line}`;
   if (!data.repo.blobBase) return `<code>${esc(label)}</code>`;
@@ -278,6 +287,8 @@ function render(data) {
     ${full && (ai.recommendations || []).length ? fold('recs-card', 'Before adopting', `${fmt(ai.recommendations.length)} recommendation${ai.recommendations.length === 1 ? '' : 's'}`,
       `<ul class="plain">${ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
 
+    ${renderPatchCard(data)}
+
     ${fold('findings-card', full ? 'All vulnerabilities' : 'Pattern hits', '<span id="findings-count"></span>', `
       <div class="filters">
         ${SEVERITIES.map((s) => `<label><input type="checkbox" data-sev="${s}" checked> <span class="sev sev-${s}">${s}</span></label>`).join('')}
@@ -321,6 +332,7 @@ function render(data) {
 
   resultsEl.hidden = false;
   wireFindings(data);
+  wirePatch(data);
   $('#show-not-reviewed')?.addEventListener('click', () => {
     $('#notreviewed-card').open = true;
     $('#notreviewed-card').scrollIntoView({ behavior: 'smooth' });
@@ -470,4 +482,184 @@ function wireFindings(data) {
   document.querySelectorAll('#findings-card [data-sev], #f-tests, #f-rule').forEach((el) => el.addEventListener('change', () => ((shown = PAGE), apply())));
   $('#f-text').addEventListener('input', () => ((shown = PAGE), apply()));
   apply();
+}
+
+// ---------- patch agent (opt-in) ----------
+const SCOPES = [
+  { id: 'high', label: 'Critical and high', sevs: ['critical', 'high'] },
+  { id: 'medium', label: 'Critical, high and medium', sevs: ['critical', 'high', 'medium'] },
+  { id: 'all', label: 'All', sevs: ['critical', 'high', 'medium', 'low'] },
+];
+
+/** Findings as the patch agent needs them; basic-scan hits get their rule's name and description. */
+function patchableFindings(data, sevs) {
+  const rules = Object.fromEntries(data.ruleSummary.map((r) => [r.ruleId, r]));
+  return data.findings
+    .filter((f) => sevs.includes(f.severity) && f.kind !== 'test' && f.line > 0)
+    .map((f) => {
+      const rule = rules[f.ruleId] || {};
+      return {
+        file: f.file,
+        line: f.line,
+        severity: f.severity,
+        title: f.title || rule.title || f.ruleId,
+        category: f.category || rule.title || '',
+        cwe: f.cwe || rule.cwe || '',
+        detail: f.detail || [rule.description, f.code ? `Flagged code: ${f.code}` : ''].filter(Boolean).join(' '),
+      };
+    });
+}
+
+function renderPatchCard(data) {
+  if (!server.ai || !data.repo.sha || !data.findings.length) return '';
+  const options = SCOPES.map((sc) => ({ ...sc, n: patchableFindings(data, sc.sevs).length })).filter((sc, i, all) => sc.n && (i === 0 || sc.n !== all[i - 1].n));
+  if (!options.length) return '';
+  return `<section class="card patch-card" id="patch-card">
+    <div class="patch-head">
+      <div>
+        <h2>Propose patches</h2>
+        <p class="sub" style="margin:0">A separate agent, acting as a security engineer, reads the code around each vulnerability and writes fixes you can download as a <code>.patch</code> file. It only runs if you start it.</p>
+      </div>
+    </div>
+    <div class="patch-controls" id="patch-controls">
+      <label class="patch-scope"><span>Patch</span>
+        <select id="patch-scope">${options.map((o) => `<option value="${o.id}">${esc(o.label)} (${fmt(o.n)})</option>`).join('')}</select>
+      </label>
+      <button type="button" id="patch-btn" class="primary">Propose patches</button>
+      <span class="sub">${esc(server.patchModel || 'Claude')} · counts toward your daily Claude budget · usually a minute or two</span>
+    </div>
+    <div id="patch-progress" hidden></div>
+    <div id="patch-results" hidden></div>
+  </section>`;
+}
+
+function wirePatch(data) {
+  const btn = $('#patch-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const scope = SCOPES.find((sc) => sc.id === $('#patch-scope').value) || SCOPES[0];
+    runPatch(data, patchableFindings(data, scope.sevs));
+  });
+}
+
+async function runPatch(data, findings) {
+  const run = ++patchRun;
+  const live = () => run === patchRun && current === data;
+  const btn = $('#patch-btn');
+  const progress = $('#patch-progress');
+  const out = $('#patch-results');
+  btn.disabled = true;
+  $('#patch-scope').disabled = true;
+  out.hidden = true;
+  progress.hidden = false;
+  progress.innerHTML = `<div class="patch-status"><span class="spinner sm" aria-hidden="true"></span><span id="patch-status-text">Starting the security engineer agent…</span></div><ol class="patch-log" id="patch-log"></ol>`;
+  const log = (ev) => {
+    if (!live()) return;
+    $('#patch-status-text').textContent = ev.message + '…';
+    if (['patch', 'skip', 'retry'].includes(ev.kind)) {
+      const li = document.createElement('li');
+      li.className = `log-${ev.kind}`;
+      li.textContent = ev.message;
+      $('#patch-log').append(li);
+    }
+  };
+  try {
+    const res = await fetch('/api/patch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ owner: data.repo.owner, repo: data.repo.name, sha: data.repo.sha, ref: data.repo.ref, findings }),
+    });
+    if (!(res.headers.get('content-type') || '').includes('application/x-ndjson') || !res.body) throw new Error(`The patch service answered HTTP ${res.status}.`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let result = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      buf += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.type === 'progress') log(msg);
+        else if (msg.type === 'error') throw new Error(msg.message);
+        else if (msg.type === 'result') result = msg.data;
+      }
+      if (done) break;
+    }
+    if (!live()) return;
+    if (!result) throw new Error('The connection closed before the patches were ready. Try again.');
+    progress.hidden = true;
+    renderPatchResults(data, result);
+  } catch (err) {
+    if (!live()) return;
+    progress.innerHTML = `<div class="error" role="alert" style="margin:12px 0 0">${esc(err.message || String(err))}</div>`;
+  } finally {
+    if (live()) {
+      btn.disabled = false;
+      $('#patch-scope').disabled = false;
+      btn.textContent = 'Propose again';
+    }
+  }
+}
+
+function renderDiff(diff) {
+  return diff
+    .split('\n')
+    .filter((l) => l && !l.startsWith('diff --git') && !l.startsWith('--- ') && !l.startsWith('+++ '))
+    .map((l) => {
+      const cls = l.startsWith('@@') ? 'd-hunk' : l.startsWith('+') ? 'd-add' : l.startsWith('-') ? 'd-del' : l.startsWith('\\') ? 'd-note' : 'd-ctx';
+      return `<span class="${cls}">${esc(l)}</span>`;
+    })
+    .join('');
+}
+
+function renderPatchResults(data, r) {
+  const out = $('#patch-results');
+  const byId = Object.fromEntries(r.findings.map((f) => [f.id, f]));
+  const fname = `owl-patches-${data.repo.owner}-${data.repo.name}-${data.repo.sha.slice(0, 7)}.patch`;
+  const cost = typeof r.costUsd === 'number' ? ` · cost $${r.costUsd < 0.01 ? r.costUsd.toFixed(4) : r.costUsd.toFixed(2)}` : '';
+  const findingLabel = (id) => {
+    const f = byId[id];
+    return f ? `${sevPill(f.severity)} ${esc(f.title)} <span class="sub mono">${esc(f.file.split('/').pop())}${f.line ? ':' + f.line : ''}</span>` : esc(id);
+  };
+  out.innerHTML = `
+    ${r.stoppedReason ? `<div class="tier-banner partial-banner" role="status"><b>Stopped early:</b> ${esc(r.stoppedReason)}. The patches below are complete and usable; the rest weren't reached.</div>` : ''}
+    <div class="patch-summary">
+      <div><b>${fmt(r.patches.length)} patch${r.patches.length === 1 ? '' : 'es'}</b> to ${fmt(r.files.length)} file${r.files.length === 1 ? '' : 's'}
+        ${r.files.length ? `<span class="sub">(+${fmt(r.files.reduce((n, f) => n + f.added, 0))} −${fmt(r.files.reduce((n, f) => n + f.removed, 0))} lines)</span>` : ''}
+        · ${fmt(r.skipped.length)} not patched${r.unaddressed.length ? ` · ${fmt(r.unaddressed.length)} not reached` : ''}
+        <span class="sub">· ${esc(modelName(r.model))}${cost}${r.cached ? ' · cached' : ''}</span></div>
+      ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button></div>` : ''}
+    </div>
+    ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent and checked only to apply cleanly — review, build and test them before relying on them.</p>` : ''}
+    ${r.summary ? `<div class="ai-summary"><h3>Agent's notes</h3>${r.summary.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('')}</div>` : ''}
+    ${r.patches.map((p) => `
+      <div class="patch-item">
+        <div class="head"><b class="mono">${esc(p.id)}</b> ${fileLink(data, p.file)} <span class="sub">+${p.added} −${p.removed}</span></div>
+        <ul class="plain patch-fixes">${p.findingIds.map((id) => `<li>${findingLabel(id)}</li>`).join('')}</ul>
+        <div class="ai-note">${esc(p.explanation)}</div>
+        <details class="diff-toggle"><summary>Show diff <span class="sub">(+${p.added} −${p.removed})</span></summary><pre class="diff">${renderDiff(p.diff)}</pre></details>
+      </div>`).join('')}
+    ${r.skipped.length || r.unaddressed.length ? `<h3>Not patched</h3><ul class="plain patch-skips">
+      ${r.skipped.map((sk) => `<li>${findingLabel(sk.findingId)}<div class="sub">${esc(sk.reason)}</div></li>`).join('')}
+      ${r.unaddressed.map((id) => `<li>${findingLabel(id)}<div class="sub">Not reached in this session.</div></li>`).join('')}
+    </ul>` : ''}
+    ${r.droppedFindings ? `<p class="sub">Only the ${fmt(r.findings.length)} most severe vulnerabilities were sent to the agent; ${fmt(r.droppedFindings)} more were left out.</p>` : ''}`;
+  out.hidden = false;
+  $('#dl-patch')?.addEventListener('click', () => {
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([r.patchFile], { type: 'text/x-patch' })), download: fname });
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+  $('#copy-patch')?.addEventListener('click', async (e) => {
+    try {
+      await navigator.clipboard.writeText(r.patchFile);
+      e.target.textContent = 'Copied';
+    } catch {
+      e.target.textContent = 'Copy failed — use Download';
+    }
+  });
 }
