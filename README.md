@@ -43,7 +43,7 @@ Findings come from an automated review (Claude, or pattern matching on a basic s
 After a scan, **Propose patches** starts a separate agentic workflow. It never runs unless the user
 clicks it. A new Claude agent, seeded with the identity of an expert security software engineer
 well-versed in writing secure and memory-safe code, works through the selected vulnerabilities
-(critical and high by default; or add medium, or all):
+(all of them by default; or only critical and high, or critical, high and medium):
 
 1. It explores the code with read-only tools (`read_file`, `search_code`) to understand each bug:
    callers, buffer sizes, ownership and lifetimes.

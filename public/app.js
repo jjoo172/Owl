@@ -524,7 +524,7 @@ function renderPatchCard(data) {
     </div>
     <div class="patch-controls" id="patch-controls">
       <label class="patch-scope"><span>Patch</span>
-        <select id="patch-scope">${options.map((o) => `<option value="${o.id}">${esc(o.label)} (${fmt(o.n)})</option>`).join('')}</select>
+        <select id="patch-scope">${options.map((o, i) => `<option value="${o.id}"${i === options.length - 1 ? ' selected' : ''}>${esc(o.label)} (${fmt(o.n)})</option>`).join('')}</select>
       </label>
       ${server.patchModels.length ? `<label class="patch-scope"><span>Model</span>
         <select id="patch-model">${server.patchModels.map((m) => `<option value="${esc(m.id)}"${m.default ? ' selected' : ''}>${esc(m.label)} (${esc(m.note)})</option>`).join('')}</select>
