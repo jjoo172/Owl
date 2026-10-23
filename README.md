@@ -74,7 +74,7 @@ CLI: `node src/cli.js owner/repo --patch [--out file.patch]`.
 
 ### Re-scanning the patched code
 
-After patches are proposed, **Re-scan patched code** runs the original vulnerability review again
+After patches are proposed, **Re-scan repo with patches applied** runs the original vulnerability review again
 on the code with the patches applied, using the same model, the same instructions and the same
 files as the first scan (so large repositories are compared like for like). Owl applies the patch
 exactly (refusing it if it doesn't match the commit), then shows **before and after** side by side:

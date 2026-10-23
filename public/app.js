@@ -503,12 +503,12 @@ function renderPatchCard(data) {
   if (!server.ai || !data.repo.sha || !data.findings.length) return '';
   const options = SCOPES.map((sc) => ({ ...sc, n: patchableFindings(data, sc.sevs).length })).filter((sc, i, all) => sc.n && (i === 0 || sc.n !== all[i - 1].n));
   if (!options.length) return '';
-  return `<div class="flow-divider" role="separator"><span>Fix &amp; verify</span></div>
-  <section class="fix-flow" aria-label="Fix and verify">
+  return `<div class="flow-divider" role="separator"><span>Fix</span></div>
+  <section class="fix-flow" aria-label="Fix">
   <section class="card patch-card" id="patch-card">
     <div class="patch-head">
       <div>
-        <h2 class="flow-title"><span class="step-num">1</span>Propose patches</h2>
+        <h2>Propose patches</h2>
         <p class="sub" style="margin:0">A separate agent, acting as a security engineer, reads the code around each vulnerability and writes fixes you can download as a <code>.patch</code> file. It only runs if you start it.</p>
       </div>
     </div>
@@ -525,8 +525,13 @@ function renderPatchCard(data) {
     <div id="patch-progress" hidden></div>
     <div id="patch-results" hidden></div>
   </section>
-  <section class="card compare-card" id="compare-card" hidden></section>
-  </section>`;
+  </section>
+  <div id="verify-flow" hidden>
+    <div class="flow-divider" role="separator"><span>Verify</span></div>
+    <section class="fix-flow" aria-label="Verify">
+      <section class="card compare-card" id="compare-card"></section>
+    </section>
+  </div>`;
 }
 
 function wirePatch(data) {
@@ -548,6 +553,7 @@ async function runPatch(data, findings, model) {
   $('#patch-scope').disabled = true;
   if ($('#patch-model')) $('#patch-model').disabled = true;
   out.hidden = true;
+  if ($('#verify-flow')) $('#verify-flow').hidden = true; // a new patch set needs a new re-scan
   progress.hidden = false;
   progress.innerHTML = `<div class="patch-status"><span class="spinner sm" aria-hidden="true"></span><span id="patch-status-text">Starting the security engineer agent…</span></div><ol class="patch-log" id="patch-log"></ol>`;
   const log = (ev) => {
@@ -646,7 +652,7 @@ function renderPatchResults(data, r) {
         ${r.files.length ? `<span class="sub">(+${fmt(r.files.reduce((n, f) => n + f.added, 0))} −${fmt(r.files.reduce((n, f) => n + f.removed, 0))} lines)</span>` : ''}
         · ${fmt(r.skipped.length)} not patched${r.unaddressed.length ? ` · ${fmt(r.unaddressed.length)} not reached` : ''}
         <span class="sub">· ${esc(modelName(r.model))}${cost}${r.cached ? ' · cached' : ''}</span></div>
-      ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button><button type="button" id="rescan-btn">Re-scan patched code</button></div>` : ''}
+      ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button><button type="button" id="rescan-btn" class="go">Re-scan repo with patches applied</button></div>` : ''}
     </div>
     ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent, checked to apply cleanly and reviewed by a second AI pass — still review, build and test them before relying on them.</p>` : ''}
     ${renderVerification(r)}
@@ -685,12 +691,13 @@ async function runRescan(data, patch) {
   const live = () => run === patchRun && current === data;
   const card = $('#compare-card');
   const btn = $('#rescan-btn');
+  const flow = $('#verify-flow');
   btn.disabled = true;
-  card.hidden = false;
-  card.innerHTML = `<h2 class="flow-title"><span class="step-num">2</span>Before and after patching</h2>
+  flow.hidden = false;
+  card.innerHTML = `<h2>Before and after patching</h2>
     <p class="sub" style="margin-top:0">Running the original vulnerability review on the patched code, with the same model, instructions and files.</p>
     <div class="patch-status"><span class="spinner sm" aria-hidden="true"></span><span id="rescan-status">Starting…</span></div>`;
-  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  flow.scrollIntoView({ behavior: 'smooth', block: 'start' });
   try {
     const res = await fetch('/api/rescan', {
       method: 'POST',
@@ -729,11 +736,11 @@ async function runRescan(data, patch) {
     renderComparison(data, result);
   } catch (err) {
     if (!live()) return;
-    card.innerHTML = `<h2 class="flow-title"><span class="step-num">2</span>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>`;
+    card.innerHTML = `<h2>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>`;
   } finally {
     if (live()) {
       btn.disabled = false;
-      btn.textContent = 'Re-scan again';
+      btn.textContent = 'Re-scan again with patches applied';
     }
   }
 }
@@ -752,7 +759,7 @@ function renderComparison(data, { after, comparison: c }) {
   const list = (items, render) => (items.length ? `<ul class="plain cmp-list">${items.map(render).join('')}</ul>` : '<p class="sub">None.</p>');
 
   card.innerHTML = `
-    <h2 class="flow-title"><span class="step-num">2</span>Before and after patching</h2>
+    <h2>Before and after patching</h2>
     ${c.comparable ? '' : `<div class="tier-banner partial-banner" role="status"><b>Not a like-for-like comparison.</b> ${
       after.tier !== 'full' ? `The re-scan fell back to a basic scan (${esc(after.tierReason || 'Claude was unavailable')}), so it can't be compared fairly with the full review.` : 'The two scans covered different amounts of the code.'
     } Re-run the re-scan when Claude is available.</div>`}
