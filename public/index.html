@@ -29,6 +29,8 @@
       <p>Point Owl at a GitHub repository. Claude reviews <strong>only the C/C++ source</strong> (docs and other text files are ignored) for memory-safety bugs — dangling references, use-after-free, out-of-bounds access, undefined behaviour, data races and classic unsafe C — and rates the risk of putting that code in your critical path.</p>
     </section>
 
+    <div class="flow-divider flow-divider-top" role="separator"><span>Scan repository</span></div>
+    <section class="scan-flow" aria-label="Scan repository">
     <form id="scan-form" class="scan-form" autocomplete="off">
       <label class="field grow">
         <span>Repository</span>
@@ -62,6 +64,7 @@
         <div class="step-head"><span class="step-num">2</span><b>Scan</b><span class="step-state" id="step2-state"></span></div>
         <p class="sub step-note" id="step2-text">Starts once the access check passes.</p>
       </div>
+    </section>
     </section>
 
     <section id="error" class="error" hidden role="alert"></section>
