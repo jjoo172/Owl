@@ -23,6 +23,9 @@ const TYPES = {
   '.png': 'image/png',
 };
 
+// Which build is live: Render sets RENDER_GIT_COMMIT; elsewhere fall back to the start time.
+const BUILD = (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || `dev-${Date.now().toString(36)}`;
+
 let active = 0;
 const ledger = new DailyBudget();
 const cache = new Map(); // key -> { at, data }
@@ -42,8 +45,17 @@ async function serveStatic(req, res) {
   const file = join(PUBLIC, rel);
   if (!file.startsWith(PUBLIC)) return send404(res);
   try {
-    const data = await readFile(file);
-    res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', 'Cache-Control': 'public, max-age=300' });
+    let data = await readFile(file);
+    const isPage = extname(file) === '.html';
+    if (isPage) {
+      // Point the page at this build's assets, so a deploy is never mixed with a cached old script.
+      data = Buffer.from(data.toString('utf8').replace(/(href|src)="(styles\.css|app\.js)"/g, `$1="$2?v=${BUILD}"`).replace('{{BUILD}}', BUILD));
+    }
+    const versioned = new URL(req.url, 'http://x').searchParams.get('v') === BUILD;
+    res.writeHead(200, {
+      'Content-Type': TYPES[extname(file)] || 'application/octet-stream',
+      'Cache-Control': isPage ? 'no-cache' : versioned ? 'public, max-age=31536000, immutable' : 'no-cache',
+    });
     res.end(data);
   } catch {
     send404(res);
@@ -217,8 +229,8 @@ function withBudget(result, clientId) {
 const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   if (path === '/api/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, patchModel: aiAvailable() ? modelLabel(patchModel()) : null, githubToken: Boolean(process.env.GITHUB_TOKEN) }));
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ ok: true, version: BUILD, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, patchModel: aiAvailable() ? modelLabel(patchModel()) : null, githubToken: Boolean(process.env.GITHUB_TOKEN) }));
   }
   if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);
@@ -228,4 +240,4 @@ const server = createServer((req, res) => {
 });
 
 server.requestTimeout = 0; // scans of large repos can take a few minutes
-server.listen(PORT, () => console.log(`Owl listening on :${PORT} (AI review ${aiAvailable() ? 'enabled' : 'disabled'})`));
+server.listen(PORT, () => console.log(`Owl ${BUILD} listening on :${PORT} (AI review ${aiAvailable() ? 'enabled' : 'disabled'}, patch agent ${aiAvailable() ? patchModel() : 'disabled'})`));

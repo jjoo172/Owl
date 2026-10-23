@@ -236,3 +236,5 @@ pre.diff .d-ctx, pre.diff .d-note { color: var(--muted); }
 .diff-toggle { margin-top: 8px; }
 .diff-toggle > summary { cursor: pointer; font-size: 13px; color: var(--accent); width: max-content; }
 .diff-toggle > summary:hover { text-decoration: underline; }
+
+.foot .build { opacity: 0.7; }

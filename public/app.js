@@ -19,7 +19,8 @@ let server = { ai: false, patchModel: null };
 let patchRun = 0; // bumps on every new scan or patch request, so stale streams are ignored
 
 // ---------- setup ----------
-fetch('/api/health')
+// Results wait for this, so features that depend on the server (the patch agent) never miss it.
+const serverReady = fetch('/api/health', { cache: 'no-store' })
   .then((r) => r.json())
   .then(({ ai, model, patchModel }) => {
     server = { ai, patchModel };
@@ -28,6 +29,7 @@ fetch('/api/health')
       : "This server has no Claude API key, so scans run as a basic pattern scan only (set ANTHROPIC_API_KEY to enable full reviews).";
   })
   .catch(() => showError(NO_SERVER_MESSAGE));
+const whenServerReady = () => serverReady.catch(() => {});
 
 document.querySelectorAll('[data-repo]').forEach((b) =>
   b.addEventListener('click', () => {
@@ -187,6 +189,7 @@ async function scan(target) {
         else if (msg.type === 'result') {
           gotResult = true;
           current = msg.data;
+          await whenServerReady();
           render(msg.data);
         }
       }
