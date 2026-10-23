@@ -400,6 +400,35 @@ function renderSummary(data) {
   </section>`;
 }
 
+/** The re-scan's overall verdict: the original reviewer's assessment of the patched code. */
+function renderAfterSummary(after, c) {
+  const lvl = (l) => `<b class="lvl-${esc(l || 'Moderate')}">${esc(l || '—')}</b>`;
+  const bits = [];
+  if (c.targeted) bits.push(`${fmt(c.targeted.fixed)} of ${fmt(c.targeted.total)} targeted vulnerabilities fixed`);
+  bits.push(`${fmt(c.after.total)} vulnerabilit${c.after.total === 1 ? 'y' : 'ies'} still flagged`);
+  const newInPatch = (c.introducedInPatchedLines || []).length;
+  if (newInPatch) bits.push(`<span class="up">${fmt(newInPatch)} new in patched lines</span>`);
+  const lead = `<p class="cmp-lead">With the patches applied: ${lvl(c.after.level)} risk${c.before.level ? ` (was ${lvl(c.before.level)})` : ''} · ${bits.join(' · ')}.</p>`;
+
+  if (!after.ai) {
+    return `<section class="card summary cmp-summary">
+      <h2>Summary</h2>
+      ${lead}
+      <ul class="plain">${(after.risk?.rationale || []).map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+      <p class="sub">Basic pattern scan only, so this can't say whether the patched code is fit for a critical path. Re-run the re-scan when Claude is available.</p>
+    </section>`;
+  }
+  const paras = String(after.ai.summary || '').split(/\n{2,}/).filter((p) => p.trim()).map((p) => `<p>${esc(p)}</p>`).join('');
+  const recs = after.ai.recommendations || [];
+  return `<section class="card summary cmp-summary">
+    <h2>Summary</h2>
+    ${lead}
+    <div class="ai-summary">${paras}</div>
+    ${recs.length ? `<h3>Before relying on the patched version</h3><ul class="cmp-recs">${recs.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+    <p class="sub">Claude's verdict on the patched code, from the same review as the original scan. It reviewed the code as it now stands and wasn't told about the patches, so the verdict isn't biased toward them.</p>
+  </section>`;
+}
+
 function renderNotReviewed(data, cov) {
   const LIMIT = 500;
   const byWhy = new Map();
@@ -796,12 +825,12 @@ function renderComparison(data, { after, comparison: c, runId }) {
         <td class="num">${delta(c.after.bySeverity[s] - c.before.bySeverity[s])}</td></tr>`).join('')}
       <tr class="total"><td><b>Total</b></td><td class="num"><b>${fmt(c.before.total)}</b></td><td class="num"><b>${fmt(c.after.total)}</b></td><td class="hide-sm"></td><td class="num">${delta(c.after.total - c.before.total)}</td></tr></tbody>
     </table>
+    ${renderAfterSummary(after, c)}
     <p class="sub">Both reviews used the same model, instructions and ${after.coverage?.complete === false ? 'subset of files' : 'files'}${after.patchedFiles ? `; ${fmt(after.patchedFiles.length)} file${after.patchedFiles.length === 1 ? ' was' : 's were'} patched` : ''}. AI reviews vary a little from run to run, so a small difference can be noise.</p>
     ${fold('cmp-fixed', 'Fixed', `${fmt(c.fixed.length)}`, list(c.fixed, (f) => row(f, f.targeted ? ' <span class="pill claude">patched</span>' : ' <span class="pill">not targeted</span>')))}
     ${fold('cmp-remaining', 'Still present', `${fmt(c.remaining.length)}`, `${c.remaining.some((m) => m.targeted) ? '<p class="sub" style="margin-top:0">Items marked <span class="pill warn">patch didn\'t fix it</span> were targeted by a patch but the re-scan still flags them.</p>' : ''}${list(c.remaining, (m) => row(m.after, `${m.targeted ? ' <span class="pill warn">patch didn\'t fix it</span>' : ''}${m.after.severity !== m.before.severity ? ` <span class="pill">was ${esc(m.before.severity)}</span>` : ''}`))}`)}
     ${fold('cmp-new-patched', 'New in lines the patches changed', `${fmt((c.introducedInPatchedLines || []).length)}`, `${(c.introducedInPatchedLines || []).length ? '<p class="sub" style="margin-top:0">These are on or next to lines a patch wrote, so the patch most likely introduced them. Review these first.</p>' : ''}${list(c.introducedInPatchedLines || [], (f) => row(f))}`)}
     ${fold('cmp-new', 'New elsewhere', `${fmt((c.introducedElsewhere || c.introduced).length)}`, `${(c.introducedElsewhere || c.introduced).length ? '<p class="sub" style="margin-top:0">In code the patches didn\'t touch, so most likely issues the first review missed, or run-to-run variation between reviews.</p>' : ''}${list(c.introducedElsewhere || c.introduced, (f) => row(f))}`)}
-    ${after.ai?.recommendations?.length ? fold('cmp-recs', 'Remaining recommendations', `${fmt(after.ai.recommendations.length)}`, `<ul class="plain">${after.ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
     <p class="sub">${esc(after.ai ? modelName(after.ai.model) : 'Basic scan')}${typeof after.ai?.costUsd === 'number' ? ` · re-scan cost $${after.ai.costUsd < 0.01 ? after.ai.costUsd.toFixed(4) : after.ai.costUsd.toFixed(2)}` : ''}${after.cached ? ' · cached' : ''}</p>
     ${runLogLinks(runId, after.cached ? 'Run log (from the re-scan that produced this cached result)' : 'Run log')}`;
 }

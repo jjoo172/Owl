@@ -295,3 +295,8 @@ button.go:hover:not(:disabled) { filter: brightness(1.08); }
 button.go:disabled { opacity: 0.55; cursor: progress; }
 .run-log { margin: 10px 0 0; font-size: 12.5px; overflow-wrap: anywhere; }
 .run-log code { font-size: 11.5px; }
+.cmp-summary { margin: 18px 0 14px; }
+.cmp-summary h3 { margin: 14px 0 6px; font-size: 14px; }
+.cmp-lead { margin: 0 0 12px; }
+.cmp-recs { margin: 0; padding-left: 20px; }
+.cmp-recs li { margin: 4px 0; }
