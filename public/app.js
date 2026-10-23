@@ -647,7 +647,6 @@ function renderPatchResults(data, r) {
     </div>
     ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent, checked to apply cleanly and reviewed by a second AI pass — still review, build and test them before relying on them.</p>` : ''}
     ${renderVerification(r)}
-    ${r.summary ? `<div class="ai-summary"><h3>Agent's notes</h3>${r.summary.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('')}</div>` : ''}
     ${r.patches.map((p) => `
       <div class="patch-item">
         <div class="head"><b class="mono">${esc(p.id)}</b> ${fileLink(data, p.file)} <span class="sub">+${p.added} −${p.removed}</span></div>
