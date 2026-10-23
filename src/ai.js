@@ -127,7 +127,10 @@ export const REVIEW_SCHEMA = {
 
 export const DEFAULT_MODEL = 'claude-haiku-5-5';
 
-const REVIEW_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 180_000);
+const REVIEW_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 600_000); // whole review, both attempts
+// One call. Responses aren't streamed, so the call must finish before Node's fetch gives up waiting
+// for response headers (300 s); max_tokens is sized to fit inside that.
+const CALL_TIMEOUT_MS = Number(process.env.AI_CALL_TIMEOUT_MS || 285_000);
 const RETRY_DELAY_MS = Number(process.env.AI_RETRY_DELAY_MS || 3000);
 const TRANSIENT = new Set([429, 500, 502, 503, 504, 529]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -266,8 +269,9 @@ function reasonFor(problem = '') {
 export async function aiReview({ budget, trace = () => {}, traceLabel = 'review', ...args }) {
   const { userContent, selection } = buildReviewRequest(args);
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
-  // Adaptive thinking counts toward max_tokens, so leave room for it plus a long findings list.
-  const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 16000);
+  // Adaptive thinking counts toward max_tokens, so leave room for it plus a long findings list:
+  // at 16k, Haiku 5.5 regularly spent the whole allowance thinking and was cut off before answering.
+  const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 40000);
 
   const reservedUsd = estimateReviewCost(model, userContent, maxTokens);
   trace(`${traceLabel}_request`, {
@@ -287,33 +291,39 @@ export async function aiReview({ budget, trace = () => {}, traceLabel = 'review'
   let spent = 0;
   let costKnown = true; // false once a call may have been billed without us seeing its usage
 
-  const body = JSON.stringify({
-    model,
-    max_tokens: maxTokens,
-    system: SYSTEM_PROMPT,
-    output_config: { format: { type: 'json_schema', schema: REVIEW_SCHEMA } },
-    messages: [{ role: 'user', content: userContent }],
-  });
+  // effort: undefined = the model's default; 'low' for a retry after the first answer was cut off,
+  // so the model thinks less and leaves room for the findings (the API docs' remedy for max_tokens stops).
+  const bodyFor = (effort) =>
+    JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      system: SYSTEM_PROMPT,
+      output_config: { format: { type: 'json_schema', schema: REVIEW_SCHEMA }, ...(effort ? { effort } : {}) },
+      messages: [{ role: 'user', content: userContent }],
+    });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REVIEW_TIMEOUT_MS);
 
   /** One API request, with one retry for temporary trouble (rejected calls aren't billed). */
-  const send = async () => {
+  const send = async (effort) => {
     let res;
     let data;
+    const body = bodyFor(effort);
     for (let attempt = 1; ; attempt++) {
       const t0 = Date.now();
       try {
         res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
-          signal: controller.signal,
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(CALL_TIMEOUT_MS)]),
           headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
           body,
         });
+        data = await res.json().catch(() => ({}));
       } catch (err) {
-        trace(`${traceLabel}_api_call`, { attempt, ms: Date.now() - t0, error: err.name === 'AbortError' ? 'timeout' : `network: ${err.message}` });
-        if (err.name === 'AbortError') {
+        const timedOut = err.name === 'AbortError' || err.name === 'TimeoutError';
+        trace(`${traceLabel}_api_call`, { attempt, effort: effort || 'default', ms: Date.now() - t0, error: timedOut ? 'timeout' : `network: ${err.message}` });
+        if (timedOut) {
           costKnown = false;
           throw new ReviewUnavailableError("Claude's review took too long", 'timeout');
         }
@@ -323,9 +333,9 @@ export async function aiReview({ budget, trace = () => {}, traceLabel = 'review'
         }
         throw new ReviewUnavailableError("The server couldn't reach Claude's API", 'network');
       }
-      data = await res.json().catch(() => ({}));
       trace(`${traceLabel}_api_call`, {
         attempt,
+        effort: effort || 'default',
         status: res.status,
         ms: Date.now() - t0,
         model: data.model,
@@ -346,7 +356,7 @@ export async function aiReview({ budget, trace = () => {}, traceLabel = 'review'
     // A response we can't use (malformed, cut off, or a High rating with no findings listed) gets one more try.
     let lastProblem = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const data = await send();
+      const data = await send(attempt > 1 && /cut off/.test(lastProblem || '') ? 'low' : undefined);
       const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       trace(`${traceLabel}_output`, { attempt, stopReason: data.stop_reason, chars: text.length, text: text.length > 300_000 ? text.slice(0, 300_000) + '… [cut]' : text });
       let problem = null;

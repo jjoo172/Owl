@@ -164,3 +164,21 @@ test('an empty findings field does not hide vulnerabilities listed under another
   assert.equal(review.findings.length, 1);
   assert.equal(review.overall_risk, 'High', 'rating casing normalized');
 });
+
+test('a review cut off at the output limit is retried at low effort, with room for thinking', async () => {
+  process.env.ANTHROPIC_API_KEY = 'test';
+  const bodies = [];
+  const cut = () => new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'max_tokens', usage: { input_tokens: 100, output_tokens: 40000 }, content: [] }));
+  const responses = [cut, ok];
+  globalThis.fetch = async (_url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return responses[bodies.length - 1]();
+  };
+  const r = await analyze(null, { dir });
+  assert.equal(r.tier, 'full');
+  assert.equal(bodies.length, 2);
+  assert.ok(bodies[0].max_tokens >= 32000, 'leaves room for adaptive thinking');
+  assert.equal(bodies[0].output_config.effort, undefined, 'first try uses the default effort');
+  assert.equal(bodies[1].output_config.effort, 'low');
+  assert.ok(bodies[1].output_config.format, 'still uses structured output');
+});

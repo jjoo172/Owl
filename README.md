@@ -167,5 +167,5 @@ best-effort (edge headers first; override with `CLIENT_IP_HEADER`). Keep a spend
 key's Console workspace as the hard backstop.
 
 Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `PATCH_MODEL` (default model for the patch agent; `claude-opus-5-5` unless set), `PATCH_JOB_BUDGET_USD` (default 5), `PATCH_VERIFY_ROUNDS` (default 2), `PATCH_MAX_TURNS` (default 40), `PATCH_MAX_FINDINGS` (default 40), `MAX_CONCURRENT_PATCHES` (default 1), `AI_SOURCE_BUDGET_CHARS`
-(default 150000), `AI_MAX_OUTPUT_TOKENS` (default 8000), `MAX_TARBALL_MB`
+(default 150000), `AI_MAX_OUTPUT_TOKENS` (default 40000; a review cut off at that limit is retried once at low effort), `MAX_TARBALL_MB`
 (default 300), `MAX_SOURCE_FILES` (default 25000), `MAX_CONCURRENT_SCANS` (default 2).
