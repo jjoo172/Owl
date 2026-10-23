@@ -12,13 +12,23 @@ import { BudgetExceededError } from './budget.js';
  * `target` is { owner, repo, ref, sha } from the access check (step 1).
  * Pass `dir` instead to scan a local checkout.
  */
-export async function analyze(target, { dir, ai = true, budget, patchText, onProgress = () => {} } = {}) {
+export async function analyze(target, { dir, ai = true, budget, patchText, onProgress = () => {}, trace = () => {} } = {}) {
   const repo = dir ? { owner: 'local', repo: basename(resolve(dir)), ref: undefined, sha: null } : target;
   if (!dir && !repo?.sha) throw new UserError('Run the access check before scanning.', 400);
   const started = Date.now();
 
   onProgress(dir ? 'Reading local files' : `Downloading ${repo.owner}/${repo.repo} @ ${repo.sha.slice(0, 10)}`);
   const { files, stats: fetchStats, sha, downloadedBytes } = dir ? await readLocalSourceFiles(dir) : await fetchSourceFiles(repo);
+  trace('downloaded', {
+    sha,
+    downloadedBytes,
+    archiveFiles: fetchStats.totalFiles,
+    sourceFiles: files.length,
+    sourceChars: files.reduce((n, f) => n + f.content.length, 0),
+    skippedLarge: fetchStats.skippedLarge,
+    truncated: fetchStats.truncated,
+    ms: Date.now() - started,
+  });
 
   let contentByPath = new Map(files.map((f) => [f.path, f.content]));
   let selectionFrom;
@@ -31,6 +41,10 @@ export async function analyze(target, { dir, ai = true, budget, patchText, onPro
     contentByPath = applied.files;
     for (const f of files) f.content = contentByPath.get(f.path);
     patched = { changedFiles: applied.changed, lineMaps: applied.lineMaps, addedLines: applied.addedLines };
+    trace('patch_applied', {
+      changedFiles: applied.changed,
+      addedLines: Object.fromEntries([...applied.addedLines].map(([p, set]) => [p, [...set].sort((a, b) => a - b)])),
+    });
   }
   const fileStats = summarizeFiles(files);
 
@@ -45,11 +59,15 @@ export async function analyze(target, { dir, ai = true, budget, patchText, onPro
   else {
     onProgress(`Claude is reviewing ${files.length.toLocaleString()} source file${files.length === 1 ? '' : 's'}`);
     try {
-      const { review, meta } = await aiReview({ budget, repo, contentByPath, selectionFrom });
+      const { review, meta } = await aiReview({ budget, repo, contentByPath, selectionFrom, trace });
       const built = claudeResults({ review, meta, contentByPath, fileStats });
       aiResult = built.ai;
       results = { stats: built.stats, risk: built.risk, ruleSummary: built.ruleSummary, hotspots: built.hotspots, findings: built.findings };
       tier = 'full';
+      trace('findings', {
+        count: results.findings.length,
+        findings: results.findings.map((f) => ({ id: f.id, severity: f.severity, file: f.file, line: f.line, category: f.category, title: f.title, cwe: f.cwe, locationVerified: f.locationVerified })),
+      });
     } catch (err) {
       if (err instanceof BudgetExceededError || err instanceof ReviewUnavailableError) tierReason = err.message.replace(/ Showing scanner results only\.$/, '').replace(/\.$/, '');
       else {
@@ -59,13 +77,19 @@ export async function analyze(target, { dir, ai = true, budget, patchText, onPro
     }
   }
 
+  trace('tier', { tier: results ? 'full' : 'basic', reason: tierReason });
   if (!results) {
     onProgress(`Running a basic pattern scan of ${files.length.toLocaleString()} source files`);
     const { _contentByPath, _allFindings, ...report } = scanRepository(files);
     results = report;
+    trace('findings', {
+      count: results.findings.length,
+      findings: results.findings.map((f) => ({ id: f.id, severity: f.severity, file: f.file, line: f.line, ruleId: f.ruleId, title: f.title })),
+    });
   }
 
   const coverage = buildCoverage({ tier, aiCoverage: aiResult?.coverage, files, fetchStats });
+  trace('coverage', { complete: coverage.complete, percent: coverage.percent, reviewedFiles: coverage.reviewedFiles, totalFiles: coverage.totalFiles, reasons: coverage.reasons });
   if (aiResult?.coverage) delete aiResult.coverage.skipped; // listed once, in coverage.notReviewed
 
   const result = {

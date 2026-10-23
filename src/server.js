@@ -11,6 +11,8 @@ import { compareScans } from './compare.js';
 import { PatchError } from './applypatch.js';
 import { checkRepository, modelLabel } from './access.js';
 import { DailyBudget, clientIdOf, fmtUsd } from './budget.js';
+import { startRun, getRun } from './runlog.js';
+import { formatRun } from './logview.js';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PORT = process.env.PORT || 3000;
@@ -92,6 +94,7 @@ async function handleScan(req, res) {
 
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    // A cached result points at the log of the run that produced it.
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
     send({ type: 'result', data: { ...hit.data, cached: true } });
     return res.end();
@@ -104,10 +107,14 @@ async function handleScan(req, res) {
 
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
   active++;
+  const run = startRun('scan', { owner, repo, ref: target.ref || null, sha, ai: useAi }, { build: BUILD });
+  send({ type: 'run', id: run.id });
   const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
   try {
     const budget = { ledger, clientId: clientIdOf(req) };
-    const data = await analyze(target, { ai: useAi, budget, onProgress: (message) => send({ type: 'progress', message }) });
+    const data = await analyze(target, { ai: useAi, budget, trace: run.trace, onProgress: (message) => (run.trace('progress', { message }), send({ type: 'progress', message })) });
+    data.runId = run.id;
+    run.end('ok', scanSummary(data));
     // Only cache complete results: a review skipped for one visitor's budget mustn't be served to others.
     // Only cache complete, non-empty full reviews; anything else should be re-run fresh next time.
     if (data.tier === 'full' && data.findings.length > 0) cache.set(key, { at: Date.now(), data });
@@ -115,6 +122,7 @@ async function handleScan(req, res) {
     send({ type: 'result', data });
   } catch (err) {
     console.error('scan failed', `${owner}/${repo}@${sha}`, err);
+    run.end('error', { message: err.message || String(err) });
     send({ type: 'error', message: err.status ? err.message : 'Something went wrong while scanning that repository.' });
   } finally {
     clearInterval(heartbeat);
@@ -161,6 +169,8 @@ async function handlePatch(req, res) {
 
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
   activePatches++;
+  const run = startRun('patch', { owner, repo, sha, ref: ref || null, model: patchModel(model), findings: findings.length }, { build: BUILD });
+  send({ type: 'run', id: run.id });
   const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
   try {
     send({ type: 'progress', message: `Downloading ${owner}/${repo} @ ${sha.slice(0, 10)}` });
@@ -172,7 +182,19 @@ async function handlePatch(req, res) {
       rawFindings: findings,
       model,
       budget: { ledger, clientId: clientIdOf(req) },
+      trace: run.trace,
       onProgress: (ev) => send({ type: 'progress', ...ev }),
+    });
+    data.runId = run.id;
+    run.end(data.stoppedReason ? 'stopped' : 'ok', {
+      model: data.model,
+      patches: data.patches.length,
+      skipped: data.skipped.length,
+      unaddressed: data.unaddressed.length,
+      stoppedReason: data.stoppedReason,
+      turns: data.turns,
+      verificationRemaining: data.verification?.remaining?.length || 0,
+      costUsd: data.costUsd,
     });
     if (data.patches.length && !data.stoppedReason) {
       patchCache.set(key, { at: Date.now(), data });
@@ -181,6 +203,7 @@ async function handlePatch(req, res) {
     send({ type: 'result', data });
   } catch (err) {
     if (!(err instanceof ReviewUnavailableError) && !err.status) console.error('patch failed', `${owner}/${repo}@${sha}`, err);
+    run.end('error', { message: err.message || String(err) });
     send({ type: 'error', message: err instanceof ReviewUnavailableError || err.status ? err.message : 'Something went wrong while proposing patches.' });
   } finally {
     clearInterval(heartbeat);
@@ -224,20 +247,51 @@ async function handleRescan(req, res) {
 
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
   active++;
+  const cleanTargets = Array.isArray(targeted) ? targeted.slice(0, 500).filter((t) => t && typeof t.file === 'string' && Number.isInteger(t.line)) : [];
+  const run = startRun(
+    'rescan',
+    {
+      owner, repo, sha, ref: ref || null,
+      patchChars: patchFile.length,
+      before: { tier: before.tier, level: before.risk?.level || null, findings: before.findings.length },
+      targeted: cleanTargets,
+      scanRunId: typeof input.scanRunId === 'string' ? input.scanRunId.slice(0, 80) : null,
+      patchRunId: typeof input.patchRunId === 'string' ? input.patchRunId.slice(0, 80) : null,
+    },
+    { build: BUILD },
+  );
+  send({ type: 'run', id: run.id });
   const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
   try {
+    run.trace('before_findings', {
+      findings: before.findings.slice(0, 3000).map((f) => ({ severity: f.severity, file: f.file, line: f.line, title: f.title, category: f.category, verdict: f.verdict })),
+    });
     const after = await analyze(
       { owner, repo, ref: typeof ref === 'string' ? ref : undefined, sha },
-      { patchText: patchFile, budget: { ledger, clientId: clientIdOf(req) }, onProgress: (message) => send({ type: 'progress', message }) },
+      { patchText: patchFile, budget: { ledger, clientId: clientIdOf(req) }, trace: run.trace, onProgress: (message) => (run.trace('progress', { message }), send({ type: 'progress', message })) },
     );
     const comparison = compareScans({
       before: { tier: before.tier, risk: before.risk, coverage: before.coverage, findings: before.findings.slice(0, 3000) },
       after,
       lineMaps: after.lineMaps,
       addedLines: after.addedLines,
-      targeted: Array.isArray(targeted) ? targeted.slice(0, 500).filter((t) => t && typeof t.file === 'string' && Number.isInteger(t.line)) : [],
+      targeted: cleanTargets,
+      trace: run.trace,
     });
-    const data = { after, comparison };
+    const data = { after, comparison, runId: run.id };
+    run.end('ok', {
+      comparable: comparison.comparable,
+      before: { level: comparison.before.level, total: comparison.before.total, bySeverity: comparison.before.bySeverity },
+      after: { level: comparison.after.level, total: comparison.after.total, bySeverity: comparison.after.bySeverity, tier: after.tier },
+      fixed: comparison.fixed.length,
+      stillPresent: comparison.remaining.length,
+      stillPresentTargeted: comparison.remaining.filter((m) => m.targeted).length,
+      stillPresentNotTargeted: comparison.remaining.filter((m) => !m.targeted).length,
+      newInPatchedLines: comparison.introducedInPatchedLines.length,
+      newElsewhere: comparison.introducedElsewhere.length,
+      targeted: comparison.targeted,
+      costUsd: after.ai?.costUsd ?? 0,
+    });
     if (after.tier === 'full') {
       rescanCache.set(key, { at: Date.now(), data });
       if (rescanCache.size > 20) rescanCache.delete(rescanCache.keys().next().value);
@@ -245,12 +299,48 @@ async function handleRescan(req, res) {
     send({ type: 'result', data });
   } catch (err) {
     if (!(err instanceof PatchError) && !err.status) console.error('rescan failed', `${owner}/${repo}@${sha}`, err);
+    run.end('error', { message: err.message || String(err) });
     send({ type: 'error', message: err instanceof PatchError || err.status ? err.message : 'Something went wrong while re-scanning the patched code.' });
   } finally {
     clearInterval(heartbeat);
     active--;
     res.end();
   }
+}
+
+function scanSummary(data) {
+  const bySeverity = {};
+  for (const f of data.findings) bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+  return {
+    tier: data.tier,
+    tierReason: data.tierReason,
+    level: data.risk?.level || null,
+    findings: data.findings.length,
+    bySeverity,
+    coveragePercent: data.coverage?.percent,
+    model: data.ai?.model || null,
+    costUsd: data.ai?.costUsd ?? 0,
+  };
+}
+
+// Run logs: /api/runs/<id> (JSON lines) or /api/runs/<id>?format=text (readable report).
+function handleRunLog(req, res, id) {
+  const run = getRun(id.replace(/\.jsonl$/, ''));
+  if (!run) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end('No run log with that id. Logs are kept for a limited time and are cleared when the server restarts.');
+  }
+  const text = run.text();
+  if (new URL(req.url, 'http://x').searchParams.get('format') === 'text') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(formatRun(text));
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Content-Disposition': `attachment; filename="owl-${run.id}.jsonl"`,
+    'Cache-Control': 'no-store',
+  });
+  res.end(text);
 }
 
 // Step 1: is the repository readable? Plain JSON, no scanning.
@@ -301,6 +391,7 @@ const server = createServer((req, res) => {
     return res.end(JSON.stringify({ ok: true, version: BUILD, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, patchModel: aiAvailable() ? modelLabel(patchModel()) : null, patchModels: aiAvailable() ? PATCH_MODELS.map((m) => ({ ...m, default: m.id === patchModel() })) : [], githubToken: Boolean(process.env.GITHUB_TOKEN) }));
   }
   if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
+  if (path.startsWith('/api/runs/') && req.method === 'GET') return handleRunLog(req, res, path.slice('/api/runs/'.length));
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);
   if (path === '/api/patch' && req.method === 'POST') return handlePatch(req, res);
   if (path === '/api/rescan' && req.method === 'POST') return handleRescan(req, res);

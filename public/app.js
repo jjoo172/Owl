@@ -51,6 +51,13 @@ form.addEventListener('submit', (e) => {
   run($('#repo').value.trim(), $('#ref').value.trim());
 });
 
+/** Links to a run's log: a readable report, and the raw JSON lines for parsing. */
+function runLogLinks(id, label = 'Run log') {
+  if (!id || !/^[a-z]+-[\w-]+$/.test(id)) return '';
+  const u = `/api/runs/${encodeURIComponent(id)}`;
+  return `<p class="sub run-log">${esc(label)} <code>${esc(id)}</code> · <a href="${u}?format=text" target="_blank" rel="noopener">view</a> · <a href="${u}" download>download (JSON lines)</a></p>`;
+}
+
 function showError(message) {
   errorEl.textContent = message;
   errorEl.hidden = false;
@@ -148,6 +155,7 @@ async function scan(target) {
   setStep(2, 'running', 'Starting…');
   $('#step2-text').textContent = `Scanning ${target.owner}/${target.repo} at commit ${target.sha.slice(0, 10)}.`;
   let gotResult = false;
+  let scanRunId = null;
   let lastStage = 'starting';
   try {
     let res;
@@ -182,7 +190,8 @@ async function scan(target) {
         } catch {
           throw new Error('The server sent a response Owl could not read. Try again in a moment.');
         }
-        if (msg.type === 'progress') {
+        if (msg.type === 'run') scanRunId = msg.id;
+        else if (msg.type === 'progress') {
           lastStage = msg.message;
           setStep(2, 'running', msg.message + '…');
         } else if (msg.type === 'error') throw new Error(msg.message);
@@ -211,7 +220,7 @@ async function scan(target) {
       : `Claude was unavailable (${current.tierReason}), so this is a basic pattern scan.`;
   } catch (err) {
     setStep(2, 'fail', 'Failed');
-    showError(err.message || String(err));
+    showError((err.message || String(err)) + (scanRunId ? ` (Run log: ${location.origin}/api/runs/${scanRunId}?format=text)` : ''));
   }
 }
 
@@ -315,6 +324,7 @@ function render(data) {
       <button id="dl-json" type="button">Download full report (JSON)</button>
       <button id="copy-link" type="button">Copy link to this scan</button>
     </section>
+    ${runLogLinks(data.runId, data.cached ? 'Run log (from the scan that produced this cached result)' : 'Run log')}
 
     ${renderPatchCard(data)}
   `;
@@ -545,6 +555,7 @@ function wirePatch(data) {
 
 async function runPatch(data, findings, model) {
   const run = ++patchRun;
+  let runId = null;
   const live = () => run === patchRun && current === data;
   const btn = $('#patch-btn');
   const progress = $('#patch-progress');
@@ -586,7 +597,8 @@ async function runPatch(data, findings, model) {
         buf = buf.slice(nl + 1);
         if (!line) continue;
         const msg = JSON.parse(line);
-        if (msg.type === 'progress') log(msg);
+        if (msg.type === 'run') runId = msg.id;
+        else if (msg.type === 'progress') log(msg);
         else if (msg.type === 'error') throw new Error(msg.message);
         else if (msg.type === 'result') result = msg.data;
       }
@@ -598,7 +610,7 @@ async function runPatch(data, findings, model) {
     renderPatchResults(data, result);
   } catch (err) {
     if (!live()) return;
-    progress.innerHTML = `<div class="error" role="alert" style="margin:12px 0 0">${esc(err.message || String(err))}</div>`;
+    progress.innerHTML = `<div class="error" role="alert" style="margin:12px 0 0">${esc(err.message || String(err))}</div>${runLogLinks(runId)}`;
   } finally {
     if (live()) {
       btn.disabled = false;
@@ -655,6 +667,7 @@ function renderPatchResults(data, r) {
       ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button><button type="button" id="rescan-btn" class="go">Re-scan repo with patches applied</button></div>` : ''}
     </div>
     ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent, checked to apply cleanly and reviewed by a second AI pass — still review, build and test them before relying on them.</p>` : ''}
+    ${runLogLinks(r.runId, r.cached ? 'Run log (from the session that produced this cached result)' : 'Run log')}
     ${renderVerification(r)}
     ${r.patches.map((p) => `
       <div class="patch-item">
@@ -688,6 +701,7 @@ function renderPatchResults(data, r) {
 // ---------- re-scan the patched code and compare ----------
 async function runRescan(data, patch) {
   const run = ++patchRun;
+  let runId = null;
   const live = () => run === patchRun && current === data;
   const card = $('#compare-card');
   const btn = $('#rescan-btn');
@@ -704,6 +718,7 @@ async function runRescan(data, patch) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         owner: data.repo.owner, repo: data.repo.name, sha: data.repo.sha, ref: data.repo.ref, patchFile: patch.patchFile,
+        scanRunId: data.runId, patchRunId: patch.runId,
         targeted: patch.findings.filter((f) => patch.patches.some((p) => p.findingIds.includes(f.id))).map((f) => ({ file: f.file, line: f.line })),
         before: {
           tier: data.tier, risk: { level: data.risk.level }, coverage: { complete: data.coverage?.complete !== false },
@@ -725,7 +740,8 @@ async function runRescan(data, patch) {
         buf = buf.slice(nl + 1);
         if (!line) continue;
         const msg = JSON.parse(line);
-        if (msg.type === 'progress' && live()) $('#rescan-status').textContent = msg.message + '…';
+        if (msg.type === 'run') runId = msg.id;
+        else if (msg.type === 'progress' && live()) $('#rescan-status').textContent = msg.message + '…';
         else if (msg.type === 'error') throw new Error(msg.message);
         else if (msg.type === 'result') result = msg.data;
       }
@@ -736,7 +752,7 @@ async function runRescan(data, patch) {
     renderComparison(data, result);
   } catch (err) {
     if (!live()) return;
-    card.innerHTML = `<h2>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>`;
+    card.innerHTML = `<h2>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>${runLogLinks(runId)}`;
   } finally {
     if (live()) {
       btn.disabled = false;
@@ -745,7 +761,7 @@ async function runRescan(data, patch) {
   }
 }
 
-function renderComparison(data, { after, comparison: c }) {
+function renderComparison(data, { after, comparison: c, runId }) {
   const card = $('#compare-card');
   const max = Math.max(1, ...SEVERITIES.map((s) => Math.max(c.before.bySeverity[s], c.after.bySeverity[s])));
   const delta = (n) => (n < 0 ? `<span class="down">−${fmt(-n)}</span>` : n > 0 ? `<span class="up">+${fmt(n)}</span>` : '<span class="sub">no change</span>');
@@ -786,5 +802,6 @@ function renderComparison(data, { after, comparison: c }) {
     ${fold('cmp-new-patched', 'New in lines the patches changed', `${fmt((c.introducedInPatchedLines || []).length)}`, `${(c.introducedInPatchedLines || []).length ? '<p class="sub" style="margin-top:0">These are on or next to lines a patch wrote, so the patch most likely introduced them. Review these first.</p>' : ''}${list(c.introducedInPatchedLines || [], (f) => row(f))}`)}
     ${fold('cmp-new', 'New elsewhere', `${fmt((c.introducedElsewhere || c.introduced).length)}`, `${(c.introducedElsewhere || c.introduced).length ? '<p class="sub" style="margin-top:0">In code the patches didn\'t touch, so most likely issues the first review missed, or run-to-run variation between reviews.</p>' : ''}${list(c.introducedElsewhere || c.introduced, (f) => row(f))}`)}
     ${after.ai?.recommendations?.length ? fold('cmp-recs', 'Remaining recommendations', `${fmt(after.ai.recommendations.length)}`, `<ul class="plain">${after.ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
-    <p class="sub">${esc(after.ai ? modelName(after.ai.model) : 'Basic scan')}${typeof after.ai?.costUsd === 'number' ? ` · re-scan cost $${after.ai.costUsd < 0.01 ? after.ai.costUsd.toFixed(4) : after.ai.costUsd.toFixed(2)}` : ''}${after.cached ? ' · cached' : ''}</p>`;
+    <p class="sub">${esc(after.ai ? modelName(after.ai.model) : 'Basic scan')}${typeof after.ai?.costUsd === 'number' ? ` · re-scan cost $${after.ai.costUsd < 0.01 ? after.ai.costUsd.toFixed(4) : after.ai.costUsd.toFixed(2)}` : ''}${after.cached ? ' · cached' : ''}</p>
+    ${runLogLinks(runId, after.cached ? 'Run log (from the re-scan that produced this cached result)' : 'Run log')}`;
 }

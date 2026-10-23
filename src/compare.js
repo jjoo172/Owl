@@ -34,31 +34,49 @@ const counts = (list) => SEVERITIES.reduce((o, s) => ((o[s] = list.filter((f) =>
  * `addedLines`: Map(path -> Set of new-side line numbers the patch wrote).
  * `targeted`: [{ file, line }] of the original vulnerabilities the patches set out to fix.
  */
-export function compareScans({ before, after, lineMaps = new Map(), addedLines = new Map(), targeted = [] }) {
+export function compareScans({ before, after, lineMaps = new Map(), addedLines = new Map(), targeted = [], trace = () => {} }) {
   const beforeFindings = (before.findings || []).filter((f) => f.verdict !== 'dismissed');
   const afterFindings = after.findings || [];
   const used = new Set();
   const remaining = [];
   const fixed = [];
 
+  const isTarget = (f) => targeted.some((t) => t.file === f.file && t.line === f.line);
+  const ref = (f, i) => ({ ...(i === undefined ? {} : { index: i }), severity: f.severity, file: f.file, line: f.line, title: f.title || f.ruleId, category: f.category || '' });
   const order = [...beforeFindings].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
   for (const f of order) {
     const map = lineMaps.get(f.file);
     const expected = map && f.line > 0 ? map(f.line) : f.line;
     let best = null;
+    const candidates = [];
     for (const [i, g] of afterFindings.entries()) {
-      if (used.has(i) || g.file !== f.file) continue;
+      if (g.file !== f.file) continue;
       const distance = f.line > 0 && g.line > 0 ? Math.abs(g.line - expected) : NEAR_LINES;
       const sim = similarity(f, g);
       // Same place and a similar kind of bug; a different kind only if it is on the very same line.
-      if (distance > NEAR_LINES || (sim < 0.25 && distance > 0)) continue;
+      let rejected = null;
+      if (used.has(i)) rejected = 'already matched to another original finding';
+      else if (distance > NEAR_LINES) rejected = `${distance} lines away (limit ${NEAR_LINES})`;
+      else if (sim < 0.25 && distance > 0) rejected = `different kind of bug (similarity ${sim.toFixed(2)} < 0.25) and not on the same line`;
       const score = sim * 10 - distance;
+      if (distance <= NEAR_LINES * 3) candidates.push({ ...ref(g, i), distance, similarity: Number(sim.toFixed(2)), score: Number(score.toFixed(2)), rejected });
+      if (rejected) continue;
       if (!best || score > best.score) best = { i, score };
     }
     if (best) {
       used.add(best.i);
       remaining.push({ before: slim(f), after: slim(afterFindings[best.i]) });
     } else fixed.push(slim(f));
+    candidates.sort((a, b) => (a.rejected ? 1 : 0) - (b.rejected ? 1 : 0) || b.score - a.score);
+    trace('match', {
+      outcome: best ? 'still_present' : 'fixed',
+      targeted: isTarget(f),
+      before: ref(f),
+      expectedLine: expected,
+      lineMoved: expected !== f.line,
+      ...(best ? { matchedTo: best.i } : {}),
+      candidates: candidates.slice(0, 5),
+    });
   }
   const introduced = afterFindings.filter((_, i) => !used.has(i)).map(slim);
   // A new finding on (or right next to) a line the patch wrote is likely caused by the patch;
@@ -69,9 +87,11 @@ export function compareScans({ before, after, lineMaps = new Map(), addedLines =
   };
   const introducedInPatchedLines = introduced.filter(inPatch);
   const introducedElsewhere = introduced.filter((f) => !inPatch(f));
+  afterFindings.forEach((g, i) => {
+    if (!used.has(i)) trace('new_finding', { where: inPatch(g) ? 'in_patched_lines' : 'elsewhere', after: ref(g, i) });
+  });
 
   // How well the patches did on the vulnerabilities they set out to fix.
-  const isTarget = (f) => targeted.some((t) => t.file === f.file && t.line === f.line);
   const targetedSummary = targeted.length
     ? { total: beforeFindings.filter(isTarget).length, fixed: fixed.filter(isTarget).length, stillPresent: remaining.filter((m) => isTarget(m.before)).length }
     : null;

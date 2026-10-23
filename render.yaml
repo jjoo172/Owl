@@ -24,3 +24,6 @@ services:
       # Optional: raises GitHub's download rate limit from 60/hour to 5,000/hour.
       - key: GITHUB_TOKEN
         sync: false
+      # Optional: also write each run log to <dir>/<id>.jsonl (use a persistent disk path).
+      - key: RUN_LOG_DIR
+        sync: false

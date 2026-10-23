@@ -242,13 +242,27 @@ function reasonFor(problem = '') {
  * worst-case cost is reserved first (throwing BudgetExceededError if over a limit) and then
  * settled with the real cost from the API's reported token usage.
  */
-export async function aiReview({ budget, ...args }) {
+export async function aiReview({ budget, trace = () => {}, traceLabel = 'review', ...args }) {
   const { userContent, selection } = buildReviewRequest(args);
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   // Adaptive thinking counts toward max_tokens, so leave room for it plus a long findings list.
   const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 16000);
 
-  const reservation = budget ? budget.ledger.reserve(budget.clientId, estimateReviewCost(model, userContent, maxTokens)) : null;
+  const reservedUsd = estimateReviewCost(model, userContent, maxTokens);
+  trace(`${traceLabel}_request`, {
+    model,
+    maxTokens,
+    mode: selection.mode,
+    filesInFull: selection.files.length,
+    totalFiles: selection.totalFiles,
+    reviewedChars: selection.reviewedChars,
+    totalChars: selection.totalChars,
+    promptChars: userContent.length,
+    reservedUsd,
+    files: selection.files.map((f) => f.path ?? f),
+    skipped: selection.skipped,
+  });
+  const reservation = budget ? budget.ledger.reserve(budget.clientId, reservedUsd) : null;
   let spent = 0;
   let costKnown = true; // false once a call may have been billed without us seeing its usage
 
@@ -268,6 +282,7 @@ export async function aiReview({ budget, ...args }) {
     let res;
     let data;
     for (let attempt = 1; ; attempt++) {
+      const t0 = Date.now();
       try {
         res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -276,6 +291,7 @@ export async function aiReview({ budget, ...args }) {
           body,
         });
       } catch (err) {
+        trace(`${traceLabel}_api_call`, { attempt, ms: Date.now() - t0, error: err.name === 'AbortError' ? 'timeout' : `network: ${err.message}` });
         if (err.name === 'AbortError') {
           costKnown = false;
           throw new ReviewUnavailableError("Claude's review took too long", 'timeout');
@@ -287,6 +303,16 @@ export async function aiReview({ budget, ...args }) {
         throw new ReviewUnavailableError("The server couldn't reach Claude's API", 'network');
       }
       data = await res.json().catch(() => ({}));
+      trace(`${traceLabel}_api_call`, {
+        attempt,
+        status: res.status,
+        ms: Date.now() - t0,
+        model: data.model,
+        stopReason: data.stop_reason,
+        usage: data.usage,
+        costUsd: data.usage ? costUsd(data.model || model, data.usage.input_tokens || 0, data.usage.output_tokens || 0) : 0,
+        ...(res.ok ? {} : { error: data.error?.message || data.error?.type || `HTTP ${res.status}` }),
+      });
       if (res.ok || !TRANSIENT.has(res.status) || attempt >= 2) break;
       await sleep(Math.min(Number(res.headers.get('retry-after')) * 1000 || RETRY_DELAY_MS, 8000));
     }
@@ -301,6 +327,7 @@ export async function aiReview({ budget, ...args }) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const data = await send();
       const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+      trace(`${traceLabel}_output`, { attempt, stopReason: data.stop_reason, chars: text.length, text: text.length > 300_000 ? text.slice(0, 300_000) + '… [cut]' : text });
       let problem = null;
       let review = null;
       if (data.stop_reason === 'max_tokens') problem = 'cut off at the output limit';
@@ -318,6 +345,7 @@ export async function aiReview({ budget, ...args }) {
         }
       }
       if (review) {
+        trace(`${traceLabel}_ok`, { attempt, overallRisk: review.overall_risk, findings: review.findings.length, costUsd: spent });
         return {
           review,
           meta: {
@@ -337,6 +365,7 @@ export async function aiReview({ budget, ...args }) {
         };
       }
       lastProblem = problem;
+      trace(`${traceLabel}_unusable`, { attempt, problem });
       console.warn(`Claude review unusable (attempt ${attempt}): ${problem}`);
     }
     throw new ReviewUnavailableError(reasonFor(lastProblem), 'format');

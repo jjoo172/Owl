@@ -88,6 +88,35 @@ patch, since patching shifts lines) and by kind of bug. AI reviews vary slightly
 page notes that a small difference can be noise. The re-scan costs one more review and counts toward
 the daily budget; if it falls back to a basic scan, the comparison is flagged as not like for like.
 
+## Run logs
+
+Every scan, patch session and re-scan writes a structured **run log**: JSON lines with a header, one
+event per step and a closing summary. It records what was downloaded and which files Claude read,
+every Claude call (status, stop reason, tokens, cost) and its raw output, the findings, every tool
+call the patch agent made and its result, each verification check, and — for a re-scan — the
+matching decision for every original finding (which re-scan finding it matched, how far away and how
+similar, and why each nearby candidate was rejected) plus where each new finding sits. That last part
+explains a "still present" or "fixed" verdict line by line.
+
+- On the page, each section ends with **Run log** · *view* (a readable report) · *download* (JSON lines).
+- `GET /api/runs/<id>` returns the JSON lines; `?format=text` returns the readable report.
+- Parse a log locally:
+
+  ```bash
+  npm run log -- owl-rescan-….jsonl              # readable report
+  npm run log -- https://owl-scanner.onrender.com/api/runs/<id>
+  npm run log -- run.jsonl --events              # event names and counts
+  npm run log -- run.jsonl --event match | jq .  # one event type as JSON
+  ```
+
+- Each finished run also prints one `owl-run {…}` summary line to stdout, so the Render log viewer can
+  be searched by run id.
+
+Logs are kept in memory for 24 hours (newest 100 runs; `RUN_LOG_TTL_HOURS`, `RUN_LOG_MAX_RUNS`) and
+are lost when the service restarts or sleeps. Set `RUN_LOG_DIR` to also write each run to
+`<dir>/<id>.jsonl` (on Render, point it at a persistent disk). Run ids are random and logs never
+contain the visitor's IP address; anyone with a run id can read that log.
+
 ## Run locally
 
 Requires Node 20+. No dependencies.

@@ -9,6 +9,7 @@ import { DEFAULT_MODEL, ReviewUnavailableError, unavailableFromResponse, aiRevie
 import { BudgetExceededError, usageCostUsd, fmtUsd } from './budget.js';
 import { resolvePath } from './results.js';
 import { unifiedDiff, diffStats, addedLines } from './diff.js';
+import { clipDeep } from './runlog.js';
 
 export const PATCH_AGENT_IDENTITY = `You are an expert security software engineer, well-versed in writing secure and memory-safe code. You are given a list of vulnerabilities found in an open-source C/C++ codebase by a security review, and your job is to propose patches to the codebase that mitigate the risk of using this package.
 
@@ -182,11 +183,16 @@ Work through these vulnerabilities and propose patches.`;
 }
 
 /** Runs the agent. Returns the patches, skipped/unaddressed findings and a combined .patch file. */
-export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, model: requestedModel, onProgress = () => {} }) {
+export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, model: requestedModel, onProgress = () => {}, trace = () => {} }) {
   const { findings, dropped } = prepareFindings(rawFindings, contentByPath);
   if (!findings.length) throw new ReviewUnavailableError('There are no vulnerabilities to patch', 'empty');
   const byId = new Map(findings.map((f) => [f.id, f]));
   const model = patchModel(requestedModel);
+  trace('patch_start', {
+    model,
+    findings: findings.map((f) => ({ id: f.id, severity: f.severity, file: f.file, line: f.line, title: f.title })),
+    dropped,
+  });
   const verification = { rounds: 0, issuesFound: 0, remaining: [], unavailable: null };
   const working = new Map(); // path -> current text, only for files the agent has changed
   const current = (p) => (working.has(p) ? working.get(p) : contentByPath.get(p));
@@ -210,7 +216,7 @@ export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, 
     onProgress({ kind: 'verify', message: `Independent review of the ${changed.size} changed file${changed.size === 1 ? '' : 's'} (check ${verification.rounds})` });
     let review;
     try {
-      const out = await aiReview({ budget, repo, contentByPath: changed });
+      const out = await aiReview({ budget, repo, contentByPath: changed, trace, traceLabel: 'verify' });
       review = out.review;
       spent += out.meta?.costUsd || 0;
       verification.costUsd = (verification.costUsd || 0) + (out.meta?.costUsd || 0);
@@ -229,6 +235,13 @@ export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, 
       .map((f) => ({ ...f, file: resolvePath(f.file, changed) || f.file }))
       .filter((f) => touched.has(f.file) && Number.isInteger(f.line) && near(f.file, f.line))
       .map((f) => ({ severity: SEVERITIES.includes(f.severity) ? f.severity : 'medium', file: f.file, line: f.line, title: clip(f.title, 200), detail: clip(f.detail, 600) }));
+    trace('verify_result', {
+      round: verification.rounds,
+      changedFiles: [...changed.keys()],
+      reviewFindings: (review.findings || []).length,
+      inPatchedLines: issues,
+      ignoredElsewhere: (review.findings || []).length - issues.length,
+    });
     verification.issuesFound += issues.length;
     verification.remaining = issues;
     onProgress({
@@ -376,11 +389,13 @@ export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, 
       turns++;
       let data;
       let cost = 0;
+      const t0 = Date.now();
       try {
         data = await callClaude({ model, system, messages, signal: controller.signal });
         cost = usageCostUsd(data.model || model, data.usage);
       } catch (err) {
         if (err.cost) cost = err.cost;
+        trace('agent_turn', { turn: turns, ms: Date.now() - t0, error: err.message || String(err) });
         throw err;
       } finally {
         spent += cost;
@@ -388,6 +403,17 @@ export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, 
       }
 
       const calls = (data.content || []).filter((b) => b.type === 'tool_use');
+      trace('agent_turn', {
+        turn: turns,
+        ms: Date.now() - t0,
+        model: data.model,
+        stopReason: data.stop_reason,
+        usage: data.usage,
+        costUsd: cost,
+        spentUsd: spent,
+        text: clip((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n'), 4000),
+        toolCalls: calls.map((c) => c.name),
+      });
       messages.push({ role: 'assistant', content: data.content });
       if (!calls.length) {
         // No tool call (tool choice is "auto" on these models). Ask it to carry on through the tools.
@@ -409,6 +435,13 @@ export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, 
         } catch (err) {
           out = { error: `Tool failed: ${err.message}` };
         }
+        trace('tool_call', {
+          turn: turns,
+          name: call.name,
+          input: clipDeep(call.input || {}, 2000),
+          ok: !out.error,
+          result: clip(out.error || out.text || '', 2000),
+        });
         if (out.error && call.name === 'propose_patch') onProgress({ kind: 'retry', message: `An edit to ${clip(call.input?.file, 80)} didn't apply; the agent is correcting it` });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: out.error || out.text, ...(out.error ? { is_error: true } : {}) });
         if (out.done) done = true;
@@ -449,6 +482,13 @@ export async function runPatchAgent({ repo, contentByPath, rawFindings, budget, 
     turns,
     durationMs: Date.now() - started,
   };
+  trace('patch_result', {
+    patches: patches.map((p) => ({ id: p.id, file: p.file, findingIds: p.findingIds, added: p.added, removed: p.removed })),
+    skipped: result.skipped,
+    unaddressed,
+    stoppedReason,
+    summary,
+  });
   result.patchFile = fileDiffs.length ? patchHeader(repo, result) + fileDiffs.map((d) => d.diff).join('') : '';
   return result;
 }

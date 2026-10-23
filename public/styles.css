@@ -293,3 +293,5 @@ pre.diff .d-ctx, pre.diff .d-note { color: var(--muted); }
 button.go { background: var(--ok); color: #05221a; border: none; font-weight: 650; }
 button.go:hover:not(:disabled) { filter: brightness(1.08); }
 button.go:disabled { opacity: 0.55; cursor: progress; }
+.run-log { margin: 10px 0 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.run-log code { font-size: 11.5px; }
