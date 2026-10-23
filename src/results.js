@@ -108,6 +108,7 @@ export function claudeResults({ review, meta, contentByPath, fileStats }) {
     ai: {
       overall_risk: level,
       summary: String(review.summary || ''),
+      criticalPath: review.critical_path || null,
       recommendations: Array.isArray(review.recommendations) ? review.recommendations.map(String) : [],
       top_concerns: findings.slice(0, 8).map((f) => ({ title: f.title, severity: f.severity, detail: f.detail, locations: f.line > 0 ? [`${f.file}:${f.line}`] : [] })),
       unmatchedLocations: unmatched,

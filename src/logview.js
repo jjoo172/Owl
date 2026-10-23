@@ -64,11 +64,13 @@ export function formatRun(text) {
     h('Summary');
     if (header.kind === 'scan') {
       out.push(`${end.tier === 'full' ? 'Full review' : 'Basic scan'}${end.tierReason ? ` (${end.tierReason})` : ''} · risk ${end.level} · ${end.findings} findings ${JSON.stringify(end.bySeverity)} · coverage ${end.coveragePercent}%`);
+      if (end.criticalPath) out.push(`critical path: ${end.criticalPath}`);
     } else if (header.kind === 'patch') {
       out.push(`${end.patches} patches · ${end.skipped} skipped · ${end.unaddressed} not reached · ${end.turns} turns · ${end.model}${end.stoppedReason ? ` · stopped: ${end.stoppedReason}` : ''}`);
       if (end.verificationRemaining) out.push(`independent review still flags ${end.verificationRemaining} issue(s) in patched lines`);
     } else if (header.kind === 'rescan') {
       out.push(`risk ${end.before?.level} → ${end.after?.level} · findings ${end.before?.total} → ${end.after?.total}${end.comparable ? '' : ' · NOT like for like'}`);
+      if (end.criticalPath) out.push(`critical path: ${end.criticalPath.before ?? '?'} → ${end.criticalPath.after ?? '?'}`);
       out.push(`fixed ${end.fixed} · still present ${end.stillPresent} (${end.stillPresentTargeted} targeted by a patch, ${end.stillPresentNotTargeted} never targeted) · new in patched lines ${end.newInPatchedLines} · new elsewhere ${end.newElsewhere}`);
       if (end.targeted) out.push(`targeted by patches: ${end.targeted.total} · fixed ${end.targeted.fixed} · still present ${end.targeted.stillPresent}`);
     }
@@ -100,6 +102,10 @@ export function formatRun(text) {
   for (const e of events.filter((x) => /_request$/.test(x.event))) {
     out.push(`${e.event.replace(/_request$/, '')}: ${e.model} reviewed ${e.filesInFull}/${e.totalFiles} files (${e.mode}), ${e.promptChars} prompt chars, reserved ${usd(e.reservedUsd)}`);
     if (e.skipped?.length) out.push(`  not in the review: ${e.skipped.slice(0, 40).join(', ')}${e.skipped.length > 40 ? `, … (${e.skipped.length})` : ''}`);
+  }
+  for (const e of events.filter((x) => /_ok$/.test(x.event) && x.criticalPath)) {
+    out.push(`${e.event.replace(/_ok$/, '')} critical-path verdict: ${e.criticalPath.verdict}`);
+    if (e.criticalPath.analysis) out.push(`  ${one(e.criticalPath.analysis, 400)}`);
   }
   for (const e of events.filter((x) => /_unusable$/.test(x.event))) out.push(`${e.event.replace(/_unusable$/, '')} attempt ${e.attempt} unusable: ${e.problem}`);
   const tier = of('tier')[0];

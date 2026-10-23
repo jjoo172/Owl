@@ -396,8 +396,26 @@ function renderSummary(data) {
   return `<section class="card summary">
     <h2>Summary</h2>
     <div class="ai-summary">${paras}</div>
+    ${renderCriticalPath(ai.criticalPath, 'Rely on this library in a critical path?')}
     <p class="sub">${cov} · ${esc(modelName(ai.model))}${cost}. Open the sections below for details.</p>
   </section>`;
+}
+
+const CRITICAL_PATH = {
+  yes: { cls: 'cp-yes', word: 'Yes', label: 'reasonable to rely on in a critical path' },
+  conditional: { cls: 'cp-conditional', word: 'Only with conditions', label: 'reasonable in a critical path only under the conditions below' },
+  no: { cls: 'cp-no', word: 'No', label: 'not reasonable to rely on in a critical path yet' },
+};
+
+/** Claude's explicit answer to "can this go in a critical path?", from the review. */
+function renderCriticalPath(cp, question) {
+  if (!cp || (!cp.verdict && !cp.analysis)) return '';
+  const v = CRITICAL_PATH[cp.verdict];
+  const paras = String(cp.analysis || '').split(/\n{2,}/).filter((p) => p.trim()).map((p) => `<p>${esc(p)}</p>`).join('');
+  return `<div class="critical-path ${v ? v.cls : ''}">
+    <div class="cp-head"><span class="cp-q">${esc(question)}</span>${v ? `<span class="cp-verdict">${esc(v.word)}</span><span class="sub">${esc(v.label)}</span>` : ''}</div>
+    ${paras ? `<div class="cp-analysis">${paras}</div>` : ''}
+  </div>`;
 }
 
 /** The re-scan's overall verdict: the original reviewer's assessment of the patched code. */
@@ -424,6 +442,7 @@ function renderAfterSummary(after, c) {
     <h2>Summary</h2>
     ${lead}
     <div class="ai-summary">${paras}</div>
+    ${renderCriticalPath(after.ai.criticalPath, 'Rely on the patched library in a critical path?')}
     ${recs.length ? `<h3>Before relying on the patched version</h3><ul class="cmp-recs">${recs.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
     <p class="sub">Claude's verdict on the patched code, from the same review as the original scan. It reviewed the code as it now stands and wasn't told about the patches, so the verdict isn't biased toward them.</p>
   </section>`;
@@ -750,7 +769,7 @@ async function runRescan(data, patch) {
         scanRunId: data.runId, patchRunId: patch.runId,
         targeted: patch.findings.filter((f) => patch.patches.some((p) => p.findingIds.includes(f.id))).map((f) => ({ file: f.file, line: f.line })),
         before: {
-          tier: data.tier, risk: { level: data.risk.level }, coverage: { complete: data.coverage?.complete !== false },
+          tier: data.tier, risk: { level: data.risk.level }, criticalPath: data.ai?.criticalPath?.verdict || null, coverage: { complete: data.coverage?.complete !== false },
           findings: data.findings.map((f) => ({ file: f.file, line: f.line, severity: f.severity, title: f.title || '', category: f.category || '', ruleId: f.ruleId || '', detail: f.detail || '', verdict: f.verdict })),
         },
       }),

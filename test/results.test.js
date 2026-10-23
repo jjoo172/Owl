@@ -53,3 +53,16 @@ test('exact duplicates collapse; malformed fields are tolerated', () => {
   assert.equal(r.findings.find((x) => x.file.endsWith('config.cpp')).severity, 'medium');
   assert.equal(r.risk.level, 'Moderate', 'unknown overall rating falls back to Moderate');
 });
+
+test('critical-path verdicts are normalised, and missing ones are tolerated', async () => {
+  const { normalizeCriticalPath, normalizeReview, REVIEW_SCHEMA } = await import('../src/ai.js');
+  assert.deepEqual(normalizeCriticalPath({ verdict: 'yes', analysis: 'Fine.' }), { verdict: 'yes', analysis: 'Fine.' });
+  assert.equal(normalizeCriticalPath({ verdict: 'Yes, with conditions', analysis: 'x' }).verdict, 'conditional');
+  assert.equal(normalizeCriticalPath({ verdict: 'Not yet', analysis: 'x' }).verdict, 'no');
+  assert.equal(normalizeCriticalPath('{"verdict":"no","analysis":"bad"}').verdict, 'no');
+  assert.equal(normalizeCriticalPath(undefined), null);
+  const { review } = normalizeReview({ overall_risk: 'High', summary: 's', findings: [], recommendations: [] });
+  assert.equal(review.critical_path, null);
+  assert.ok(REVIEW_SCHEMA.required.includes('critical_path'));
+  assert.equal(REVIEW_SCHEMA.properties.critical_path.additionalProperties, false);
+});

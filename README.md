@@ -22,7 +22,8 @@ files are read (`.c`, `.cc`, `.cpp`, `.h`, `.hpp`, …); docs and other text fil
 - **Full review (default).** Claude, prompted as an expert C++ safety researcher, reads the source
   — every non-test file when the repo fits in ~150k characters, otherwise the riskiest files first —
   and reports every vulnerability it finds: file, line, severity, category, CWE and explanation,
-  plus an overall risk rating, a summary and recommendations. That list *is* the result: every
+  plus an overall risk rating, a summary, an explicit **critical-path verdict** (yes / only with
+  conditions / no, with a short analysis of what decides it) and recommendations. That list *is* the result: every
   reported vulnerability is shown and counted, at every severity. A finding whose cited line doesn't
   match the source is still shown, flagged "exact line not found — check nearby".
 - **Partial scans are labelled as such.** When a repository is too big for one review (or files are

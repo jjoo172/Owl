@@ -300,3 +300,13 @@ button.go:disabled { opacity: 0.55; cursor: progress; }
 .cmp-lead { margin: 0 0 12px; }
 .cmp-recs { margin: 0; padding-left: 20px; }
 .cmp-recs li { margin: 4px 0; }
+.critical-path { margin: 14px 0 4px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); border-left-width: 4px; background: rgba(255, 255, 255, 0.025); }
+.critical-path .cp-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.critical-path .cp-q { font-weight: 650; }
+.critical-path .cp-verdict { font-weight: 750; }
+.critical-path .cp-analysis { margin-top: 8px; }
+.critical-path .cp-analysis p { margin: 0 0 8px; }
+.critical-path .cp-analysis p:last-child { margin-bottom: 0; }
+.cp-yes { border-left-color: var(--ok); } .cp-yes .cp-verdict { color: var(--ok); }
+.cp-conditional { border-left-color: var(--medium); } .cp-conditional .cp-verdict { color: var(--medium); }
+.cp-no { border-left-color: var(--critical); } .cp-no .cp-verdict { color: var(--critical); }

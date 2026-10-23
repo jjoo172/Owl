@@ -19,7 +19,8 @@ Review it as a security auditor would, file by file. Look for every vulnerabilit
 Report your results as a single JSON object in the required format, listing the findings first:
 - findings: every distinct vulnerability you are confident about, one entry per bug (not per theme), at the line where it occurs, ordered by severity. Cite only path:line locations from the numbered source you were shown — never invent code. Include low-severity issues too.
 - Severity: critical = likely exploitable memory corruption; high = memory-unsafe or UB that can corrupt/leak memory or crash; medium = UB or misuse that is dangerous under plausible conditions; low = hardening issue or fragile code.
-- overall_risk reflects the risk of putting this code in a critical path. If you only saw part of the repository, say how that limits your confidence in the summary.`;
+- overall_risk reflects the risk of putting this code in a critical path. If you only saw part of the repository, say how that limits your confidence in the summary.
+- critical_path: your direct answer to whether it is reasonable to rely on this library, as the code stands now, in a critical code path. verdict is "yes" (reasonable as is), "conditional" (reasonable only after specific steps or with specific limits on how it is used) or "no" (not reasonable until the problems are fixed). analysis is 1-2 short paragraphs justifying it: which remaining issues decide it, how likely they are to be hit by realistic inputs, what the conditions are for a "conditional" verdict, and how much a partial view limits your confidence.`;
 
 // Signals that a file is worth reading first when the whole repo doesn't fit.
 const RISK_SIGNALS =
@@ -108,9 +109,19 @@ export const REVIEW_SCHEMA = {
     },
     overall_risk: { type: 'string', enum: ['Low', 'Moderate', 'High', 'Critical'] },
     summary: { type: 'string', description: '2-4 short paragraphs: what the code does, dominant risk themes, and whether it is reasonable for a critical path.' },
+    critical_path: {
+      type: 'object',
+      description: 'Whether it is reasonable to rely on this library, as the code stands now, in a critical code path.',
+      properties: {
+        verdict: { type: 'string', enum: ['yes', 'conditional', 'no'] },
+        analysis: { type: 'string', description: '1-2 short paragraphs: the deciding issues, how likely they are to be hit, any conditions, and confidence.' },
+      },
+      required: ['verdict', 'analysis'],
+      additionalProperties: false,
+    },
     recommendations: { type: 'array', description: 'Up to 8 concrete steps before adopting this code.', items: { type: 'string' } },
   },
-  required: ['findings', 'overall_risk', 'summary', 'recommendations'],
+  required: ['findings', 'overall_risk', 'summary', 'critical_path', 'recommendations'],
   additionalProperties: false,
 };
 
@@ -223,7 +234,17 @@ export function normalizeReview(input) {
   const recommendations = (asList(r.recommendations) ?? []).map(String);
   const risk = String(r.overall_risk ?? '').trim().toLowerCase();
   const overall_risk = ['low', 'moderate', 'high', 'critical'].includes(risk) ? risk[0].toUpperCase() + risk.slice(1) : r.overall_risk;
-  return { review: { ...r, overall_risk, findings, recommendations: recommendations.slice(0, 8), summary: String(r.summary ?? '') } };
+  return { review: { ...r, overall_risk, findings, recommendations: recommendations.slice(0, 8), summary: String(r.summary ?? ''), critical_path: normalizeCriticalPath(r.critical_path) } };
+}
+
+/** { verdict: 'yes' | 'conditional' | 'no', analysis } or null if the review didn't give one. */
+export function normalizeCriticalPath(v) {
+  if (typeof v === 'string') v = tryJson(v) ?? { analysis: v };
+  if (!v || typeof v !== 'object') return null;
+  const raw = String(v.verdict ?? v.answer ?? '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+  const verdict = /condition|only if|caveat|with /.test(raw) ? 'conditional' : /^(no|not)\b/.test(raw) ? 'no' : /^(yes|reasonable|ok|safe)\b/.test(raw) ? 'yes' : null;
+  const analysis = String(v.analysis ?? v.reasoning ?? v.explanation ?? '').trim();
+  return verdict || analysis ? { verdict, analysis } : null;
 }
 
 const HIGH_RATINGS = new Set(['High', 'Critical']);
@@ -345,7 +366,7 @@ export async function aiReview({ budget, trace = () => {}, traceLabel = 'review'
         }
       }
       if (review) {
-        trace(`${traceLabel}_ok`, { attempt, overallRisk: review.overall_risk, findings: review.findings.length, costUsd: spent });
+        trace(`${traceLabel}_ok`, { attempt, overallRisk: review.overall_risk, criticalPath: review.critical_path, findings: review.findings.length, costUsd: spent });
         return {
           review,
           meta: {
