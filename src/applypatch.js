@@ -2,6 +2,8 @@
 // and removed line must match. Used to re-scan the patched code. Also maps each file's old line
 // numbers to new ones, so findings from before and after the patch can be compared.
 
+import { unifiedDiff, addedLines as addedLinesOf } from './diff.js';
+
 export class PatchError extends Error {}
 
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -107,7 +109,9 @@ export function applyPatch(contentByPath, text) {
     files.set(path, out.join('\n') + (out.length && outEofNewline ? '\n' : ''));
     lineMaps.set(path, lineMapper(anchors));
   }
-  return { files, changed: parsed.map((f) => f.path), lineMaps };
+  // New-side line numbers each file's patch added or changed (to tell patch-introduced findings apart).
+  const addedLines = new Map(parsed.map(({ path }) => [path, new Set(addedLinesOf(unifiedDiff(path, contentByPath.get(path), files.get(path))))]));
+  return { files, changed: parsed.map((f) => f.path), lineMaps, addedLines };
 }
 
 /** Old line -> new line: exact for unchanged lines, nearest unchanged neighbour for edited ones. */

@@ -15,15 +15,15 @@ const NO_SERVER_MESSAGE =
   'served by a static site; open the "owl-scanner" web service deployed from render.yaml instead.';
 
 let current = null;
-let server = { ai: false, patchModel: null };
+let server = { ai: false, patchModel: null, patchModels: [] };
 let patchRun = 0; // bumps on every new scan or patch request, so stale streams are ignored
 
 // ---------- setup ----------
 // Results wait for this, so features that depend on the server (the patch agent) never miss it.
 const serverReady = fetch('/api/health', { cache: 'no-store' })
   .then((r) => r.json())
-  .then(({ ai, model, patchModel }) => {
-    server = { ai, patchModel };
+  .then(({ ai, model, patchModel, patchModels }) => {
+    server = { ai, patchModel, patchModels: patchModels || [] };
     $('#ai-hint').textContent = ai
       ? `Every scan is a full review by ${model || 'Claude'}, which reads the source like a security auditor. If Claude is unavailable, Owl falls back to a basic pattern scan and tells you.`
       : "This server has no Claude API key, so scans run as a basic pattern scan only (set ANTHROPIC_API_KEY to enable full reviews).";
@@ -528,8 +528,11 @@ function renderPatchCard(data) {
       <label class="patch-scope"><span>Patch</span>
         <select id="patch-scope">${options.map((o) => `<option value="${o.id}">${esc(o.label)} (${fmt(o.n)})</option>`).join('')}</select>
       </label>
+      ${server.patchModels.length ? `<label class="patch-scope"><span>Model</span>
+        <select id="patch-model">${server.patchModels.map((m) => `<option value="${esc(m.id)}"${m.default ? ' selected' : ''}>${esc(m.label)} (${esc(m.note)})</option>`).join('')}</select>
+      </label>` : ''}
       <button type="button" id="patch-btn" class="primary">Propose patches</button>
-      <span class="sub">${esc(server.patchModel || 'Claude')} · counts toward your daily Claude budget · usually a minute or two</span>
+      <span class="sub">Every patch is checked by an independent review before the agent finishes · counts toward your daily Claude budget · a few minutes</span>
     </div>
     <div id="patch-progress" hidden></div>
     <div id="patch-results" hidden></div>
@@ -542,11 +545,11 @@ function wirePatch(data) {
   if (!btn) return;
   btn.addEventListener('click', () => {
     const scope = SCOPES.find((sc) => sc.id === $('#patch-scope').value) || SCOPES[0];
-    runPatch(data, patchableFindings(data, scope.sevs));
+    runPatch(data, patchableFindings(data, scope.sevs), $('#patch-model')?.value);
   });
 }
 
-async function runPatch(data, findings) {
+async function runPatch(data, findings, model) {
   const run = ++patchRun;
   const live = () => run === patchRun && current === data;
   const btn = $('#patch-btn');
@@ -554,13 +557,14 @@ async function runPatch(data, findings) {
   const out = $('#patch-results');
   btn.disabled = true;
   $('#patch-scope').disabled = true;
+  if ($('#patch-model')) $('#patch-model').disabled = true;
   out.hidden = true;
   progress.hidden = false;
   progress.innerHTML = `<div class="patch-status"><span class="spinner sm" aria-hidden="true"></span><span id="patch-status-text">Starting the security engineer agent…</span></div><ol class="patch-log" id="patch-log"></ol>`;
   const log = (ev) => {
     if (!live()) return;
     $('#patch-status-text').textContent = ev.message + '…';
-    if (['patch', 'skip', 'retry'].includes(ev.kind)) {
+    if (['patch', 'skip', 'retry', 'verify'].includes(ev.kind)) {
       const li = document.createElement('li');
       li.className = `log-${ev.kind}`;
       li.textContent = ev.message;
@@ -571,7 +575,7 @@ async function runPatch(data, findings) {
     const res = await fetch('/api/patch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: data.repo.owner, repo: data.repo.name, sha: data.repo.sha, ref: data.repo.ref, findings }),
+      body: JSON.stringify({ owner: data.repo.owner, repo: data.repo.name, sha: data.repo.sha, ref: data.repo.ref, findings, ...(model ? { model } : {}) }),
     });
     if (!(res.headers.get('content-type') || '').includes('application/x-ndjson') || !res.body) throw new Error(`The patch service answered HTTP ${res.status}.`);
     const reader = res.body.getReader();
@@ -604,9 +608,26 @@ async function runPatch(data, findings) {
     if (live()) {
       btn.disabled = false;
       $('#patch-scope').disabled = false;
+      if ($('#patch-model')) $('#patch-model').disabled = false;
       btn.textContent = 'Propose again';
     }
   }
+}
+
+function renderVerification(r) {
+  const v = r.verification;
+  if (!v || !r.patches.length) return '';
+  const issues = (list) => `<ul class="plain cmp-list">${list.map((f) => `<li>${sevPill(f.severity)} <b>${esc(f.title)}</b> <span class="mono sub">${esc(f.file)}:${f.line}</span><div class="sub">${esc(f.detail)}</div></li>`).join('')}</ul>`;
+  if (v.unavailable && !v.rounds) return `<div class="verify-box warn"><b>Not independently checked.</b> ${esc(v.unavailable)}.</div>`;
+  if (v.remaining.length) {
+    return `<div class="verify-box warn"><b>Independent review still flags ${fmt(v.remaining.length)} issue${v.remaining.length === 1 ? '' : 's'} in the patched lines</b> after ${fmt(v.rounds)} check${v.rounds === 1 ? '' : 's'}. Review ${v.remaining.length === 1 ? 'it' : 'them'} before applying:${issues(v.remaining)}</div>`;
+  }
+  if (v.unavailable) return `<div class="verify-box warn"><b>Partly checked.</b> ${esc(v.unavailable)}.</div>`;
+  return `<div class="verify-box ok"><b>✓ Independently reviewed:</b> ${
+    v.issuesFound
+      ? `the review found ${fmt(v.issuesFound)} issue${v.issuesFound === 1 ? '' : 's'} in the agent's first draft, and ${v.issuesFound === 1 ? 'it was' : 'all were'} fixed before it finished.`
+      : 'no new issues in the patched lines.'
+  }</div>`;
 }
 
 function renderDiff(diff) {
@@ -638,7 +659,8 @@ function renderPatchResults(data, r) {
         <span class="sub">· ${esc(modelName(r.model))}${cost}${r.cached ? ' · cached' : ''}</span></div>
       ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button><button type="button" id="rescan-btn">Re-scan patched code</button></div>` : ''}
     </div>
-    ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent and checked only to apply cleanly — review, build and test them before relying on them.</p>` : ''}
+    ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent, checked to apply cleanly and reviewed by a second AI pass — still review, build and test them before relying on them.</p>` : ''}
+    ${renderVerification(r)}
     ${r.summary ? `<div class="ai-summary"><h3>Agent's notes</h3>${r.summary.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('')}</div>` : ''}
     ${r.patches.map((p) => `
       <div class="patch-item">
@@ -687,6 +709,7 @@ async function runRescan(data, patch) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         owner: data.repo.owner, repo: data.repo.name, sha: data.repo.sha, ref: data.repo.ref, patchFile: patch.patchFile,
+        targeted: patch.findings.filter((f) => patch.patches.some((p) => p.findingIds.includes(f.id))).map((f) => ({ file: f.file, line: f.line })),
         before: {
           tier: data.tier, risk: { level: data.risk.level }, coverage: { complete: data.coverage?.complete !== false },
           findings: data.findings.map((f) => ({ file: f.file, line: f.line, severity: f.severity, title: f.title || '', category: f.category || '', ruleId: f.ruleId || '', detail: f.detail || '', verdict: f.verdict })),
@@ -750,7 +773,9 @@ function renderComparison(data, { after, comparison: c }) {
       <div class="cmp-arrow" aria-hidden="true">→</div>
       ${side('With the patches', c.after, c.after.tier)}
       <div class="cmp-verdict"><b>${c.levelChange === null ? '' : c.levelChange < 0 ? 'Risk reduced' : c.levelChange > 0 ? 'Risk increased' : 'Risk level unchanged'}</b>
-        <div class="sub">${esc(levelWord)} · ${fmt(c.fixed.length)} fixed · ${fmt(c.remaining.length)} still present · ${fmt(c.introduced.length)} new</div></div>
+        <div class="sub">${esc(levelWord)} · ${fmt(c.fixed.length)} fixed · ${fmt(c.remaining.length)} still present · ${fmt(c.introduced.length)} new</div>
+        ${c.targeted ? `<div class="cmp-targeted"><b>${fmt(c.targeted.fixed)} of ${fmt(c.targeted.total)}</b> vulnerabilities the patches targeted are gone${c.targeted.stillPresent ? ` · <span class="up">${fmt(c.targeted.stillPresent)} still flagged</span>` : ''}</div>` : ''}
+        ${c.introducedInPatchedLines?.length ? `<div class="cmp-targeted"><span class="up"><b>${fmt(c.introducedInPatchedLines.length)}</b> new issue${c.introducedInPatchedLines.length === 1 ? '' : 's'} in lines the patches changed</span></div>` : ''}</div>
     </div>
     <table class="cmp-table">
       <thead><tr><th>Severity</th><th class="num">Before</th><th class="num">After</th><th class="hide-sm"></th><th class="num">Change</th></tr></thead>
@@ -762,9 +787,10 @@ function renderComparison(data, { after, comparison: c }) {
     </table>
     <p class="sub">Both reviews used the same model, instructions and ${after.coverage?.complete === false ? 'subset of files' : 'files'}${after.patchedFiles ? `; ${fmt(after.patchedFiles.length)} file${after.patchedFiles.length === 1 ? ' was' : 's were'} patched` : ''}. AI reviews vary a little from run to run, so a small difference can be noise.</p>
     ${after.ai?.summary ? `<div class="ai-summary"><h3>Review of the patched code</h3>${after.ai.summary.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('')}</div>` : ''}
-    ${fold('cmp-fixed', 'Fixed', `${fmt(c.fixed.length)}`, list(c.fixed, (f) => row(f)))}
-    ${fold('cmp-remaining', 'Still present', `${fmt(c.remaining.length)}`, list(c.remaining, (m) => row(m.after, m.after.severity !== m.before.severity ? ` <span class="pill">was ${esc(m.before.severity)}</span>` : '')))}
-    ${fold('cmp-new', 'New in the patched code', `${fmt(c.introduced.length)}`, `${c.introduced.length ? '<p class="sub" style="margin-top:0">Found only in the re-scan. Some may be introduced by a patch; others may be issues the first review missed.</p>' : ''}${list(c.introduced, (f) => row(f))}`)}
+    ${fold('cmp-fixed', 'Fixed', `${fmt(c.fixed.length)}`, list(c.fixed, (f) => row(f, f.targeted ? ' <span class="pill claude">patched</span>' : ' <span class="pill">not targeted</span>')))}
+    ${fold('cmp-remaining', 'Still present', `${fmt(c.remaining.length)}`, `${c.remaining.some((m) => m.targeted) ? '<p class="sub" style="margin-top:0">Items marked <span class="pill warn">patch didn\'t fix it</span> were targeted by a patch but the re-scan still flags them.</p>' : ''}${list(c.remaining, (m) => row(m.after, `${m.targeted ? ' <span class="pill warn">patch didn\'t fix it</span>' : ''}${m.after.severity !== m.before.severity ? ` <span class="pill">was ${esc(m.before.severity)}</span>` : ''}`))}`)}
+    ${fold('cmp-new-patched', 'New in lines the patches changed', `${fmt((c.introducedInPatchedLines || []).length)}`, `${(c.introducedInPatchedLines || []).length ? '<p class="sub" style="margin-top:0">These are on or next to lines a patch wrote, so the patch most likely introduced them. Review these first.</p>' : ''}${list(c.introducedInPatchedLines || [], (f) => row(f))}`)}
+    ${fold('cmp-new', 'New elsewhere', `${fmt((c.introducedElsewhere || c.introduced).length)}`, `${(c.introducedElsewhere || c.introduced).length ? '<p class="sub" style="margin-top:0">In code the patches didn\'t touch, so most likely issues the first review missed, or run-to-run variation between reviews.</p>' : ''}${list(c.introducedElsewhere || c.introduced, (f) => row(f))}`)}
     ${after.ai?.recommendations?.length ? fold('cmp-recs', 'Remaining recommendations', `${fmt(after.ai.recommendations.length)}`, `<ul class="plain">${after.ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
     <p class="sub">${esc(after.ai ? modelName(after.ai.model) : 'Basic scan')}${typeof after.ai?.costUsd === 'number' ? ` · re-scan cost $${after.ai.costUsd < 0.01 ? after.ai.costUsd.toFixed(4) : after.ai.costUsd.toFixed(2)}` : ''}${after.cached ? ' · cached' : ''}</p>`;
 }

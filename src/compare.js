@@ -30,7 +30,11 @@ function similarity(a, b) {
 const slim = (f) => ({ file: f.file, line: f.line, severity: f.severity, title: f.title || f.ruleId, category: f.category || '', detail: f.detail || '' });
 const counts = (list) => SEVERITIES.reduce((o, s) => ((o[s] = list.filter((f) => f.severity === s).length), o), {});
 
-export function compareScans({ before, after, lineMaps = new Map() }) {
+/**
+ * `addedLines`: Map(path -> Set of new-side line numbers the patch wrote).
+ * `targeted`: [{ file, line }] of the original vulnerabilities the patches set out to fix.
+ */
+export function compareScans({ before, after, lineMaps = new Map(), addedLines = new Map(), targeted = [] }) {
   const beforeFindings = (before.findings || []).filter((f) => f.verdict !== 'dismissed');
   const afterFindings = after.findings || [];
   const used = new Set();
@@ -57,6 +61,20 @@ export function compareScans({ before, after, lineMaps = new Map() }) {
     } else fixed.push(slim(f));
   }
   const introduced = afterFindings.filter((_, i) => !used.has(i)).map(slim);
+  // A new finding on (or right next to) a line the patch wrote is likely caused by the patch;
+  // anywhere else it is more likely something the first review missed, or run-to-run variation.
+  const inPatch = (f) => {
+    const set = addedLines.get(f.file);
+    return Boolean(set && f.line > 0 && [-2, -1, 0, 1, 2].some((d) => set.has(f.line + d)));
+  };
+  const introducedInPatchedLines = introduced.filter(inPatch);
+  const introducedElsewhere = introduced.filter((f) => !inPatch(f));
+
+  // How well the patches did on the vulnerabilities they set out to fix.
+  const isTarget = (f) => targeted.some((t) => t.file === f.file && t.line === f.line);
+  const targetedSummary = targeted.length
+    ? { total: beforeFindings.filter(isTarget).length, fixed: fixed.filter(isTarget).length, stillPresent: remaining.filter((m) => isTarget(m.before)).length }
+    : null;
 
   const level = (r) => (LEVELS.includes(r?.risk?.level) ? r.risk.level : null);
   const lb = level(before);
@@ -66,8 +84,11 @@ export function compareScans({ before, after, lineMaps = new Map() }) {
     before: { tier: before.tier, level: lb, total: beforeFindings.length, bySeverity: counts(beforeFindings) },
     after: { tier: after.tier, level: la, total: afterFindings.length, bySeverity: counts(afterFindings) },
     levelChange: lb && la ? LEVELS.indexOf(la) - LEVELS.indexOf(lb) : null,
-    fixed,
-    remaining,
+    fixed: fixed.map((f) => ({ ...f, targeted: isTarget(f) })),
+    remaining: remaining.map((m) => ({ ...m, targeted: isTarget(m.before) })),
     introduced,
+    introducedInPatchedLines,
+    introducedElsewhere,
+    targeted: targetedSummary,
   };
 }

@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 process.env.AI_RETRY_DELAY_MS = '5';
-const { runPatchAgent, prepareFindings, TOOLS, PATCH_AGENT_IDENTITY } = await import('../src/patcher.js');
+const { runPatchAgent, prepareFindings, TOOLS, PATCH_AGENT_IDENTITY, PATCH_MODELS, patchModel } = await import('../src/patcher.js');
 const { DailyBudget } = await import('../src/budget.js');
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,12 +30,22 @@ afterEach(() => {
   delete process.env.ANTHROPIC_API_KEY;
 });
 
-/** Fake Claude: each turn is a function (request body) -> array of tool calls [name, input]. */
-function script(turns, { usage = { input_tokens: 2000, output_tokens: 300 } } = {}) {
+/**
+ * Fake Claude. Agent turns: each a function (request body) -> array of tool calls [name, input].
+ * Verification reviews (requests without tools) answer from `verify`, a list of findings per check.
+ */
+function script(turns, { usage = { input_tokens: 2000, output_tokens: 300 }, verify = [] } = {}) {
   const requests = [];
   let i = 0;
+  let v = 0;
   globalThis.fetch = async (_url, opts) => {
     const body = JSON.parse(opts.body);
+    if (!body.tools) {
+      const findings = verify[v++] || [];
+      requests.verifications = (requests.verifications || 0) + 1;
+      return new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', usage: { input_tokens: 500, output_tokens: 100 },
+        content: [{ type: 'text', text: JSON.stringify({ findings, overall_risk: findings.length ? 'Moderate' : 'Low', summary: 's', recommendations: [] }) }] }));
+    }
     requests.push(body);
     const turn = turns[Math.min(i++, turns.length - 1)];
     const calls = turn(body);
@@ -102,12 +112,18 @@ test('a full session: explores, retries a bad edit, patches, skips, and the .pat
   assert.ok(r.costUsd > 0 && Math.abs(ledger.spent('me') - r.costUsd) < 1e-12, 'every turn charged to the visitor');
   assert.equal(contentByPath.get('cpp/src/stats.cpp'), fx('stats.cpp'), 'original source never modified');
 
-  // Prompt caching: system + exactly one breakpoint on the newest message.
+  // Works on Opus/Sonnet 5.5: no forced tool choice; automatic prompt caching; history never edited.
   const req = requests.at(-1);
-  assert.equal(req.system[0].cache_control.type, 'ephemeral');
-  const marks = req.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((b) => b.cache_control);
-  assert.equal(marks.length, 1);
-  assert.deepEqual(req.tool_choice, { type: 'any' });
+  assert.deepEqual(req.tool_choice, { type: 'auto' });
+  assert.deepEqual(req.cache_control, { type: 'ephemeral' });
+  assert.equal(req.model, 'claude-opus-5-5', 'most capable model by default');
+  assert.ok(req.max_tokens >= 16000, 'room for thinking plus the answer');
+  assert.ok(!req.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.cache_control)), 'no per-message cache markers');
+  for (let k = 1; k < requests.length; k++) {
+    assert.deepEqual(requests[k].messages.slice(0, requests[k - 1].messages.length), requests[k - 1].messages, 'append-only history (keeps thinking blocks valid)');
+  }
+  assert.equal(r.verification.rounds, 1, 'changes were independently reviewed before finishing');
+  assert.equal(r.verification.remaining.length, 0);
 
   // The download applies cleanly to the original files and gives the patched result.
   const dir = mkdtempSync(join(tmpdir(), 'owl-patch-'));
@@ -149,12 +165,12 @@ test('budget: each turn reserves its worst case first, so the visitor is never o
     () => [['propose_patch', { finding_ids: ['F2'], file: 'cpp/src/stats.cpp', edits: [{ old_text: 'return a <= b;', new_text: 'return a < b;' }], explanation: 'x' }]],
     () => [['read_file', { path: 'cpp/src/config.cpp', start_line: 1, end_line: 10 }]], // keeps exploring until money runs out
   ], { usage: { input_tokens: 3000, output_tokens: 300 } });
-  const ledger = new DailyBudget({ perUserUsd: 0.004, globalUsd: null });
-  const r = await runPatchAgent({ repo, contentByPath, rawFindings: findings, budget: { ledger, clientId: 'me' } });
+  const ledger = new DailyBudget({ perUserUsd: 0.012, globalUsd: null });
+  const r = await runPatchAgent({ repo, contentByPath, rawFindings: findings, model: 'claude-haiku-5-5', budget: { ledger, clientId: 'me' } });
   assert.equal(r.patches.length, 1, 'the patch from before the limit is kept');
   assert.match(r.stoppedReason, /budget ran out/);
   assert.ok(r.turns >= 2);
-  assert.ok(ledger.spent('me') <= 0.004, `spent ${ledger.spent('me')}`);
+  assert.ok(ledger.spent('me') <= 0.012, `spent ${ledger.spent('me')}`);
 });
 
 test('API failures: nothing done yet is an error; after some work it stops with what it has', async () => {
@@ -188,4 +204,62 @@ test('a hostile explanation cannot break the patch file', async () => {
   writeFileSync(join(dir, 'owl.patch'), r.patchFile);
   const touched = execFileSync('git', ['apply', '--numstat', 'owl.patch'], { cwd: dir, encoding: 'utf8' });
   assert.equal(touched.trim(), '1\t1\tcpp/src/stats.cpp', 'only the real change is applied');
+});
+
+test('model choice: allowlisted per run, Opus 5.5 by default', () => {
+  assert.deepEqual(PATCH_MODELS.map((m) => m.id), ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
+  assert.equal(patchModel(), 'claude-opus-5-5');
+  assert.equal(patchModel('claude-sonnet-5-5'), 'claude-sonnet-5-5');
+  assert.equal(patchModel('gpt-whatever'), 'claude-opus-5-5', 'unknown models are never passed through');
+});
+
+test('verification: an issue in a patched line goes back to the agent, which fixes it before finishing', async () => {
+  process.env.ANTHROPIC_API_KEY = 'x';
+  // The agent's first fix for F2 "works" but is itself unsafe (a VLA); the review flags that line.
+  const unsafe = '[](int a, int b) { int tmp[a]; return a < b; }';
+  const requests = script([
+    () => [['propose_patch', { finding_ids: ['F2'], file: 'cpp/src/stats.cpp', edits: [{ old_text: '[](int a, int b) { return a <= b; }', new_text: unsafe }], explanation: 'strict ordering' }]],
+    () => [['skip_finding', { finding_id: 'F1', reason: 'needs API change' }], ['skip_finding', { finding_id: 'F3', reason: 'out of scope' }], ['finish', { summary: 'done' }]],
+    (body) => {
+      const feedback = body.messages.at(-1).content.find((b) => b.type === 'tool_result' && b.is_error);
+      assert.match(feedback.content, /independent security review .* found 1 issue/);
+      assert.match(feedback.content, /stats\.cpp:23 Variable-length array/);
+      return [['propose_patch', { finding_ids: ['F2'], file: 'cpp/src/stats.cpp', edits: [{ old_text: unsafe, new_text: '[](int a, int b) { return a < b; }' }], explanation: 'drop the VLA' }]];
+    },
+    () => [['finish', { summary: 'done, VLA removed' }]],
+  ], {
+    verify: [
+      [
+        { title: 'Variable-length array', severity: 'high', category: 'Stack overflow', cwe: '', file: 'cpp/src/stats.cpp', line: 23, detail: 'tmp[a] sized by input' },
+        { title: 'Signed overflow in mean', severity: 'medium', category: 'Integer overflow', cwe: '', file: 'cpp/src/stats.cpp', line: 14, detail: 'pre-existing, not in patched lines' },
+      ],
+      [],
+    ],
+  });
+  const events = [];
+  const r = await runPatchAgent({ repo, contentByPath, rawFindings: findings, onProgress: (e) => events.push(e) });
+  assert.equal(requests.verifications, 2);
+  assert.equal(r.verification.rounds, 2);
+  assert.equal(r.verification.issuesFound, 1, 'pre-existing issues outside the patched lines are not blamed on the patch');
+  assert.deepEqual(r.verification.remaining, []);
+  assert.equal(r.summary, 'done, VLA removed');
+  assert.ok(r.patchFile.includes('+              [](int a, int b) { return a < b; });'));
+  assert.ok(!r.patchFile.includes('tmp[a]'), 'the unsafe intermediate version is not in the download');
+  assert.ok(events.some((e) => e.kind === 'verify' && /found 1 issue/.test(e.message)));
+});
+
+test('verification is bounded: after the last check, remaining issues are reported, not looped on', async () => {
+  process.env.ANTHROPIC_API_KEY = 'x';
+  const issue = { title: 'Still unsafe', severity: 'high', category: 'Buffer overflow', cwe: '', file: 'cpp/src/stats.cpp', line: 23, detail: 'd' };
+  script([
+    () => [['propose_patch', { finding_ids: ['F2'], file: 'cpp/src/stats.cpp', edits: [{ old_text: 'return a <= b;', new_text: 'return a < b;' }], explanation: 'x' }],
+      ['skip_finding', { finding_id: 'F1', reason: 'n/a' }], ['skip_finding', { finding_id: 'F3', reason: 'n/a' }], ['finish', { summary: 'done' }]],
+    () => [['finish', { summary: 'I believe it is a false positive' }]],
+    () => [['finish', { summary: 'final' }]],
+  ], { verify: [[issue], [issue]] });
+  const r = await runPatchAgent({ repo, contentByPath, rawFindings: findings });
+  assert.equal(r.verification.rounds, 2);
+  assert.equal(r.verification.remaining.length, 1);
+  assert.equal(r.stoppedReason, null);
+  assert.equal(r.summary, 'final');
 });

@@ -6,7 +6,7 @@ import { analyze } from './analyze.js';
 import { aiAvailable, ReviewUnavailableError } from './ai.js';
 import { createHash } from 'node:crypto';
 import { fetchSourceFiles } from './github.js';
-import { runPatchAgent, patchModel } from './patcher.js';
+import { runPatchAgent, patchModel, PATCH_MODELS } from './patcher.js';
 import { compareScans } from './compare.js';
 import { PatchError } from './applypatch.js';
 import { checkRepository, modelLabel } from './access.js';
@@ -142,14 +142,15 @@ async function handlePatch(req, res) {
   } catch {
     return fail(400, 'Bad request');
   }
-  const { owner, repo, sha, ref, findings } = input;
+  const { owner, repo, sha, ref, findings, model } = input;
+  if (model !== undefined && !PATCH_MODELS.some((m) => m.id === model)) return fail(400, 'Unknown patch model.');
   if (!/^[\w.-]+$/.test(owner || '') || !/^[\w.-]+$/.test(repo || '') || !/^[0-9a-f]{40}$/.test(sha || '')) {
     return fail(400, 'Patch requests need the owner, repo and commit of a scan.');
   }
   if (!Array.isArray(findings) || !findings.length) return fail(400, 'There are no vulnerabilities to patch.');
   if (!aiAvailable()) return fail(503, "Proposing patches needs Claude, which isn't configured on this server.");
 
-  const key = `${owner}/${repo}@${sha}#${createHash('sha256').update(JSON.stringify(findings)).digest('hex').slice(0, 16)}`.toLowerCase();
+  const key = `${owner}/${repo}@${sha}#${patchModel(model)}#${createHash('sha256').update(JSON.stringify(findings)).digest('hex').slice(0, 16)}`.toLowerCase();
   const hit = patchCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
@@ -169,6 +170,7 @@ async function handlePatch(req, res) {
       repo: { owner, repo, sha, ref },
       contentByPath,
       rawFindings: findings,
+      model,
       budget: { ledger, clientId: clientIdOf(req) },
       onProgress: (ev) => send({ type: 'progress', ...ev }),
     });
@@ -204,7 +206,7 @@ async function handleRescan(req, res) {
   } catch {
     return fail(400, 'Bad request (the patch may be too large to re-scan).');
   }
-  const { owner, repo, sha, ref, patchFile, before } = input;
+  const { owner, repo, sha, ref, patchFile, before, targeted } = input;
   if (!/^[\w.-]+$/.test(owner || '') || !/^[\w.-]+$/.test(repo || '') || !/^[0-9a-f]{40}$/.test(sha || '')) {
     return fail(400, 'Re-scan requests need the owner, repo and commit of a scan.');
   }
@@ -232,6 +234,8 @@ async function handleRescan(req, res) {
       before: { tier: before.tier, risk: before.risk, coverage: before.coverage, findings: before.findings.slice(0, 3000) },
       after,
       lineMaps: after.lineMaps,
+      addedLines: after.addedLines,
+      targeted: Array.isArray(targeted) ? targeted.slice(0, 500).filter((t) => t && typeof t.file === 'string' && Number.isInteger(t.line)) : [],
     });
     const data = { after, comparison };
     if (after.tier === 'full') {
@@ -294,7 +298,7 @@ const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   if (path === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ ok: true, version: BUILD, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, patchModel: aiAvailable() ? modelLabel(patchModel()) : null, githubToken: Boolean(process.env.GITHUB_TOKEN) }));
+    return res.end(JSON.stringify({ ok: true, version: BUILD, ai: aiAvailable(), model: aiAvailable() ? modelLabel() : null, patchModel: aiAvailable() ? modelLabel(patchModel()) : null, patchModels: aiAvailable() ? PATCH_MODELS.map((m) => ({ ...m, default: m.id === patchModel() })) : [], githubToken: Boolean(process.env.GITHUB_TOKEN) }));
   }
   if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);

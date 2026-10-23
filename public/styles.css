@@ -263,3 +263,14 @@ pre.diff .d-ctx, pre.diff .d-note { color: var(--muted); }
   .cmp-side { min-width: 0; }
   .cmp-side .level { font-size: 24px; }
 }
+
+/* Patch verification */
+.verify-box { border-radius: 10px; padding: 10px 12px; margin-top: 12px; font-size: 13.5px; border: 1px solid var(--line); }
+.verify-box.ok { border-color: rgba(79, 209, 165, 0.45); background: rgba(79, 209, 165, 0.07); }
+.verify-box.ok b { color: var(--ok); }
+.verify-box.warn { border-color: rgba(245, 209, 66, 0.45); background: rgba(245, 209, 66, 0.07); }
+.verify-box.warn b { color: var(--medium); }
+.verify-box .cmp-list { margin-top: 8px; }
+.patch-log .log-verify { color: var(--low); }
+.cmp-targeted { margin-top: 4px; font-size: 13.5px; }
+.cmp-targeted .up, .cmp-list .up { color: var(--critical); }

@@ -13,7 +13,7 @@ services:
       # Model defaults to claude-haiku-5-5; set ANTHROPIC_MODEL to override.
       - key: ANTHROPIC_API_KEY
         sync: false
-      # Optional: model for the opt-in patch agent (defaults to ANTHROPIC_MODEL / claude-haiku-5-5).
+      # Optional: default model for the opt-in patch agent (claude-opus-5-5 unless set; selectable per run).
       - key: PATCH_MODEL
         sync: false
       # Optional: per-visitor daily Claude spend in USD (default 10) and an optional site-wide cap.

@@ -30,7 +30,7 @@ export async function analyze(target, { dir, ai = true, budget, patchText, onPro
     selectionFrom = contentByPath; // same files as the original scan
     contentByPath = applied.files;
     for (const f of files) f.content = contentByPath.get(f.path);
-    patched = { changedFiles: applied.changed, lineMaps: applied.lineMaps };
+    patched = { changedFiles: applied.changed, lineMaps: applied.lineMaps, addedLines: applied.addedLines };
   }
   const fileStats = summarizeFiles(files);
 
@@ -95,7 +95,10 @@ export async function analyze(target, { dir, ai = true, budget, patchText, onPro
     aiEnabled: aiAvailable(),
   };
   // Old->new line maps for a re-scan; not enumerable, so they never go into the JSON response.
-  if (patched) Object.defineProperty(result, 'lineMaps', { value: patched.lineMaps, enumerable: false });
+  if (patched) {
+    Object.defineProperty(result, 'lineMaps', { value: patched.lineMaps, enumerable: false });
+    Object.defineProperty(result, 'addedLines', { value: patched.addedLines, enumerable: false });
+  }
   return result;
 }
 

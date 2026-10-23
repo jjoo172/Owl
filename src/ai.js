@@ -245,7 +245,8 @@ function reasonFor(problem = '') {
 export async function aiReview({ budget, ...args }) {
   const { userContent, selection } = buildReviewRequest(args);
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
-  const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 8000);
+  // Adaptive thinking counts toward max_tokens, so leave room for it plus a long findings list.
+  const maxTokens = Number(process.env.AI_MAX_OUTPUT_TOKENS || 16000);
 
   const reservation = budget ? budget.ledger.reserve(budget.clientId, estimateReviewCost(model, userContent, maxTokens)) : null;
   let spent = 0;

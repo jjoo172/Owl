@@ -66,7 +66,7 @@ test('re-scan end to end: the review sees patched code, and findings are matched
     // After patching: the median overflow (line 29 -> 30) is still there; one new low issue appears.
     const findings = [
       { title: 'Signed overflow in median sum', severity: 'medium', category: 'Signed integer overflow', cwe: 'CWE-190', file: 'cpp/src/stats.cpp', line: 30, detail: 'd' },
-      { title: 'Unchecked empty input', severity: 'low', category: 'Robustness', cwe: '', file: 'cpp/src/stats.cpp', line: 9, detail: 'd' },
+      { title: 'Unchecked empty input', severity: 'low', category: 'Robustness', cwe: '', file: 'cpp/src/stats.cpp', line: 18, detail: 'd' },
     ];
     return new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 10 },
       content: [{ type: 'text', text: JSON.stringify({ findings, overall_risk: 'Moderate', summary: 'Better.', recommendations: [] }) }] }));
@@ -85,7 +85,7 @@ test('re-scan end to end: the review sees patched code, and findings are matched
       { file: 'cpp/src/stats.cpp', line: 29, severity: 'medium', title: 'Signed overflow in median sum', category: 'Signed integer overflow' },
     ],
   };
-  const c = compareScans({ before, after, lineMaps: after.lineMaps });
+  const c = compareScans({ before, after, lineMaps: after.lineMaps, addedLines: after.addedLines, targeted: [{ file: 'cpp/src/stats.cpp', line: 23 }, { file: 'cpp/src/stats.cpp', line: 29 }] });
   assert.equal(c.comparable, true);
   assert.equal(c.before.level, 'High');
   assert.equal(c.after.level, 'Moderate');
@@ -95,6 +95,13 @@ test('re-scan end to end: the review sees patched code, and findings are matched
   assert.deepEqual([c.remaining[0].before.line, c.remaining[0].after.line], [29, 30], 'matched across the shifted line');
   assert.deepEqual(c.introduced.map((f) => f.title), ['Unchecked empty input']);
   assert.deepEqual(c.after.bySeverity, { critical: 0, high: 0, medium: 1, low: 1 });
+  assert.deepEqual(c.targeted, { total: 2, fixed: 1, stillPresent: 1 }, 'of what the patches aimed at: comparator fixed, median not');
+  // The new low finding is on line 18, well clear of the patched lines (11-12, 24): likely missed before.
+  assert.deepEqual(c.introducedInPatchedLines, []);
+  assert.deepEqual(c.introducedElsewhere.map((f) => f.line), [18]);
+  // ...while a finding on a line the patch wrote counts as likely introduced by it.
+  const c2 = compareScans({ before, after: { ...after, findings: [...after.findings, { file: 'cpp/src/stats.cpp', line: 12, severity: 'high', title: 'Dangling pointer to local', category: 'Use-after-free' }] }, lineMaps: after.lineMaps, addedLines: after.addedLines });
+  assert.deepEqual(c2.introducedInPatchedLines.map((f) => f.line), [12]);
 });
 
 test('a different kind of bug nearby is not mistaken for the same one; tiers that differ are flagged', () => {

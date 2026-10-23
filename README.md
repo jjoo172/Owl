@@ -51,14 +51,24 @@ well-versed in writing secure and memory-safe code, works through the selected v
    match exactly one place) and applies to an in-memory copy of the source. A rejected edit is
    returned to the agent to correct. It marks false positives and redesign-sized problems with
    `skip_finding`, then calls `finish` with notes for maintainers.
+   Before the session may end, Owl runs an **independent security review of the changed files** and
+   sends anything it finds in lines the agent wrote back to the agent to fix (up to two checks). The
+   page shows what that check found and anything it still flags.
 3. Owl assembles a unified diff of every accepted change. The page shows each patch, the
    vulnerabilities it fixes and why, with its diff, and offers a `.patch` download that applies with
    `git apply` from the repository root.
 
+The page lets the person pick the patch model per run: **Claude Opus 5.5** (default, most capable),
+Sonnet 5.5, or Haiku 5.5. Writing correct fixes is harder than spotting bugs, so the default favours
+capability; a session on a small repo costs well under a dollar with Opus. The agent uses
+`tool_choice: auto` (Opus and Sonnet 5.5 reject forced tool use), a 16k-token allowance per turn
+(adaptive thinking counts toward it), automatic prompt caching and append-only history, so thinking
+blocks stay valid across turns.
+
 Owl never pushes or opens pull requests: the person reviews, builds and tests the patch themselves.
 Tools are strict (schema-validated by the API), turns use prompt caching, and every turn's cost
 is reserved against the visitor's daily Claude budget first. A session stops early, keeping its
-completed patches, at 40 steps, a $2 session cap, 10 minutes, or when the daily budget runs out.
+completed patches, at 40 steps, a $5 session cap, 10 minutes, or when the daily budget runs out.
 
 CLI: `node src/cli.js owner/repo --patch [--out file.patch]`.
 
@@ -69,8 +79,11 @@ on the code with the patches applied, using the same model, the same instruction
 files as the first scan (so large repositories are compared like for like). Owl applies the patch
 exactly (refusing it if it doesn't match the commit), then shows **before and after** side by side:
 the overall risk level, vulnerability counts by severity, and which vulnerabilities were **fixed**,
-are **still present** (including ones whose severity changed), or are **new**, plus Claude's summary
-of the patched code. Findings are matched across the two reviews by file, by line (moved through the
+are **still present** (including ones whose severity changed, and ones a patch targeted but didn't
+fix), or are **new**, plus Claude's summary of the patched code. It also reports how many of the
+vulnerabilities the patches *targeted* are gone, and splits new findings into those **in lines the
+patches changed** (most likely introduced by a patch) and those **elsewhere** (most likely missed by
+the first review, or run-to-run variation). Findings are matched across the two reviews by file, by line (moved through the
 patch, since patching shifts lines) and by kind of bug. AI reviews vary slightly between runs, so the
 page notes that a small difference can be noise. The re-scan costs one more review and counts toward
 the daily budget; if it falls back to a basic scan, the comparison is flagged as not like for like.
@@ -123,6 +136,6 @@ are kept in memory, so they also reset when the service restarts or sleeps, and 
 best-effort (edge headers first; override with `CLIENT_IP_HEADER`). Keep a spend limit on the API
 key's Console workspace as the hard backstop.
 
-Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `PATCH_MODEL` (model for the patch agent; defaults to `ANTHROPIC_MODEL`), `PATCH_JOB_BUDGET_USD` (default 2), `PATCH_MAX_TURNS` (default 40), `PATCH_MAX_FINDINGS` (default 40), `MAX_CONCURRENT_PATCHES` (default 1), `AI_SOURCE_BUDGET_CHARS`
+Other optional settings: `ANTHROPIC_MODEL` (default `claude-haiku-5-5`), `PATCH_MODEL` (default model for the patch agent; `claude-opus-5-5` unless set), `PATCH_JOB_BUDGET_USD` (default 5), `PATCH_VERIFY_ROUNDS` (default 2), `PATCH_MAX_TURNS` (default 40), `PATCH_MAX_FINDINGS` (default 40), `MAX_CONCURRENT_PATCHES` (default 1), `AI_SOURCE_BUDGET_CHARS`
 (default 150000), `AI_MAX_OUTPUT_TOKENS` (default 8000), `MAX_TARBALL_MB`
 (default 300), `MAX_SOURCE_FILES` (default 25000), `MAX_CONCURRENT_SCANS` (default 2).

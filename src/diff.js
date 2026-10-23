@@ -140,3 +140,20 @@ export function diffStats(diff) {
   }
   return { added, removed };
 }
+
+/** New-side line numbers of the lines a diff adds or changes, for each hunk. */
+export function addedLines(diff) {
+  const out = [];
+  let n = 0;
+  for (const line of diff.split('\n')) {
+    const m = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (m) {
+      n = Number(m[1]);
+      continue;
+    }
+    if (!n || line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) out.push(n++);
+    else if (line.startsWith(' ')) n++;
+  }
+  return out;
+}
