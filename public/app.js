@@ -503,10 +503,12 @@ function renderPatchCard(data) {
   if (!server.ai || !data.repo.sha || !data.findings.length) return '';
   const options = SCOPES.map((sc) => ({ ...sc, n: patchableFindings(data, sc.sevs).length })).filter((sc, i, all) => sc.n && (i === 0 || sc.n !== all[i - 1].n));
   if (!options.length) return '';
-  return `<section class="card patch-card" id="patch-card">
+  return `<div class="flow-divider" role="separator"><span>Fix &amp; verify</span></div>
+  <section class="fix-flow" aria-label="Fix and verify">
+  <section class="card patch-card" id="patch-card">
     <div class="patch-head">
       <div>
-        <h2>Propose patches</h2>
+        <h2 class="flow-title"><span class="step-num">1</span>Propose patches</h2>
         <p class="sub" style="margin:0">A separate agent, acting as a security engineer, reads the code around each vulnerability and writes fixes you can download as a <code>.patch</code> file. It only runs if you start it.</p>
       </div>
     </div>
@@ -523,7 +525,8 @@ function renderPatchCard(data) {
     <div id="patch-progress" hidden></div>
     <div id="patch-results" hidden></div>
   </section>
-  <section class="card compare-card" id="compare-card" hidden></section>`;
+  <section class="card compare-card" id="compare-card" hidden></section>
+  </section>`;
 }
 
 function wirePatch(data) {
@@ -684,7 +687,7 @@ async function runRescan(data, patch) {
   const btn = $('#rescan-btn');
   btn.disabled = true;
   card.hidden = false;
-  card.innerHTML = `<h2>Before and after patching</h2>
+  card.innerHTML = `<h2 class="flow-title"><span class="step-num">2</span>Before and after patching</h2>
     <p class="sub" style="margin-top:0">Running the original vulnerability review on the patched code, with the same model, instructions and files.</p>
     <div class="patch-status"><span class="spinner sm" aria-hidden="true"></span><span id="rescan-status">Starting…</span></div>`;
   card.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -726,7 +729,7 @@ async function runRescan(data, patch) {
     renderComparison(data, result);
   } catch (err) {
     if (!live()) return;
-    card.innerHTML = `<h2>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>`;
+    card.innerHTML = `<h2 class="flow-title"><span class="step-num">2</span>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>`;
   } finally {
     if (live()) {
       btn.disabled = false;
@@ -749,7 +752,7 @@ function renderComparison(data, { after, comparison: c }) {
   const list = (items, render) => (items.length ? `<ul class="plain cmp-list">${items.map(render).join('')}</ul>` : '<p class="sub">None.</p>');
 
   card.innerHTML = `
-    <h2>Before and after patching</h2>
+    <h2 class="flow-title"><span class="step-num">2</span>Before and after patching</h2>
     ${c.comparable ? '' : `<div class="tier-banner partial-banner" role="status"><b>Not a like-for-like comparison.</b> ${
       after.tier !== 'full' ? `The re-scan fell back to a basic scan (${esc(after.tierReason || 'Claude was unavailable')}), so it can't be compared fairly with the full review.` : 'The two scans covered different amounts of the code.'
     } Re-run the re-scan when Claude is available.</div>`}
