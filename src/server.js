@@ -7,6 +7,8 @@ import { aiAvailable, ReviewUnavailableError } from './ai.js';
 import { createHash } from 'node:crypto';
 import { fetchSourceFiles } from './github.js';
 import { runPatchAgent, patchModel } from './patcher.js';
+import { compareScans } from './compare.js';
+import { PatchError } from './applypatch.js';
 import { checkRepository, modelLabel } from './access.js';
 import { DailyBudget, clientIdOf, fmtUsd } from './budget.js';
 
@@ -185,6 +187,68 @@ async function handlePatch(req, res) {
   }
 }
 
+// Opt-in re-scan: runs the original vulnerability review on the patched code (same prompt, same
+// files) and compares it with the original scan. Streams progress like /api/scan.
+const rescanCache = new Map(); // key -> { at, data }
+
+async function handleRescan(req, res) {
+  const send = (obj) => res.write(JSON.stringify(obj) + '\n');
+  const fail = (status, message) => {
+    res.writeHead(status, { 'Content-Type': 'application/x-ndjson' });
+    send({ type: 'error', message });
+    res.end();
+  };
+  let input;
+  try {
+    input = await readJson(req, 4_000_000);
+  } catch {
+    return fail(400, 'Bad request (the patch may be too large to re-scan).');
+  }
+  const { owner, repo, sha, ref, patchFile, before } = input;
+  if (!/^[\w.-]+$/.test(owner || '') || !/^[\w.-]+$/.test(repo || '') || !/^[0-9a-f]{40}$/.test(sha || '')) {
+    return fail(400, 'Re-scan requests need the owner, repo and commit of a scan.');
+  }
+  if (typeof patchFile !== 'string' || !patchFile.includes('@@')) return fail(400, 'There is no patch to re-scan.');
+  if (!before || !Array.isArray(before.findings)) return fail(400, 'Re-scan requests need the original scan to compare with.');
+
+  const key = `${owner}/${repo}@${sha}#${createHash('sha256').update(patchFile).update(JSON.stringify(before.findings)).digest('hex').slice(0, 16)}`.toLowerCase();
+  const hit = rescanCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+    send({ type: 'result', data: { ...hit.data, cached: true } });
+    return res.end();
+  }
+  if (active >= MAX_CONCURRENT) return fail(429, 'The scanner is busy with other repositories. Try again in a minute.');
+
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  active++;
+  const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
+  try {
+    const after = await analyze(
+      { owner, repo, ref: typeof ref === 'string' ? ref : undefined, sha },
+      { patchText: patchFile, budget: { ledger, clientId: clientIdOf(req) }, onProgress: (message) => send({ type: 'progress', message }) },
+    );
+    const comparison = compareScans({
+      before: { tier: before.tier, risk: before.risk, coverage: before.coverage, findings: before.findings.slice(0, 3000) },
+      after,
+      lineMaps: after.lineMaps,
+    });
+    const data = { after, comparison };
+    if (after.tier === 'full') {
+      rescanCache.set(key, { at: Date.now(), data });
+      if (rescanCache.size > 20) rescanCache.delete(rescanCache.keys().next().value);
+    }
+    send({ type: 'result', data });
+  } catch (err) {
+    if (!(err instanceof PatchError) && !err.status) console.error('rescan failed', `${owner}/${repo}@${sha}`, err);
+    send({ type: 'error', message: err instanceof PatchError || err.status ? err.message : 'Something went wrong while re-scanning the patched code.' });
+  } finally {
+    clearInterval(heartbeat);
+    active--;
+    res.end();
+  }
+}
+
 // Step 1: is the repository readable? Plain JSON, no scanning.
 const checkCache = new Map(); // short-lived, saves GitHub API quota on repeat checks
 async function handleCheck(req, res) {
@@ -235,6 +299,7 @@ const server = createServer((req, res) => {
   if (path === '/api/check' && req.method === 'GET') return handleCheck(req, res);
   if (path === '/api/scan' && req.method === 'POST') return handleScan(req, res);
   if (path === '/api/patch' && req.method === 'POST') return handlePatch(req, res);
+  if (path === '/api/rescan' && req.method === 'POST') return handleRescan(req, res);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
   res.writeHead(405).end();
 });

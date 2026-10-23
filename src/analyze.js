@@ -3,6 +3,7 @@ import { fetchSourceFiles, readLocalSourceFiles, UserError } from './github.js';
 import { scanRepository, summarizeFiles } from './scanner.js';
 import { aiAvailable, aiReview, ReviewUnavailableError } from './ai.js';
 import { claudeResults } from './results.js';
+import { applyPatch } from './applypatch.js';
 import { BudgetExceededError } from './budget.js';
 
 /**
@@ -11,7 +12,7 @@ import { BudgetExceededError } from './budget.js';
  * `target` is { owner, repo, ref, sha } from the access check (step 1).
  * Pass `dir` instead to scan a local checkout.
  */
-export async function analyze(target, { dir, ai = true, budget, onProgress = () => {} } = {}) {
+export async function analyze(target, { dir, ai = true, budget, patchText, onProgress = () => {} } = {}) {
   const repo = dir ? { owner: 'local', repo: basename(resolve(dir)), ref: undefined, sha: null } : target;
   if (!dir && !repo?.sha) throw new UserError('Run the access check before scanning.', 400);
   const started = Date.now();
@@ -19,7 +20,18 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
   onProgress(dir ? 'Reading local files' : `Downloading ${repo.owner}/${repo.repo} @ ${repo.sha.slice(0, 10)}`);
   const { files, stats: fetchStats, sha, downloadedBytes } = dir ? await readLocalSourceFiles(dir) : await fetchSourceFiles(repo);
 
-  const contentByPath = new Map(files.map((f) => [f.path, f.content]));
+  let contentByPath = new Map(files.map((f) => [f.path, f.content]));
+  let selectionFrom;
+  let patched = null;
+  if (patchText) {
+    // Re-scan: apply the patches, then review the patched code exactly as the original was reviewed.
+    onProgress('Applying the patches');
+    const applied = applyPatch(contentByPath, patchText);
+    selectionFrom = contentByPath; // same files as the original scan
+    contentByPath = applied.files;
+    for (const f of files) f.content = contentByPath.get(f.path);
+    patched = { changedFiles: applied.changed, lineMaps: applied.lineMaps };
+  }
   const fileStats = summarizeFiles(files);
 
   // Full review: Claude reads the source. The pattern scanner runs only if Claude can't.
@@ -33,7 +45,7 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
   else {
     onProgress(`Claude is reviewing ${files.length.toLocaleString()} source file${files.length === 1 ? '' : 's'}`);
     try {
-      const { review, meta } = await aiReview({ budget, repo, contentByPath });
+      const { review, meta } = await aiReview({ budget, repo, contentByPath, selectionFrom });
       const built = claudeResults({ review, meta, contentByPath, fileStats });
       aiResult = built.ai;
       results = { stats: built.stats, risk: built.risk, ruleSummary: built.ruleSummary, hotspots: built.hotspots, findings: built.findings };
@@ -56,7 +68,7 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
   const coverage = buildCoverage({ tier, aiCoverage: aiResult?.coverage, files, fetchStats });
   if (aiResult?.coverage) delete aiResult.coverage.skipped; // listed once, in coverage.notReviewed
 
-  return {
+  const result = {
     coverage,
     repo: {
       owner: repo.owner,
@@ -78,9 +90,13 @@ export async function analyze(target, { dir, ai = true, budget, onProgress = () 
     ...results,
     tier,
     tierReason,
+    patchedFiles: patched ? patched.changedFiles : undefined,
     ai: aiResult,
     aiEnabled: aiAvailable(),
   };
+  // Old->new line maps for a re-scan; not enumerable, so they never go into the JSON response.
+  if (patched) Object.defineProperty(result, 'lineMaps', { value: patched.lineMaps, enumerable: false });
+  return result;
 }
 
 /**

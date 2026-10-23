@@ -32,6 +32,14 @@ function numbered(content) {
     .join('\n');
 }
 
+/** Re-measures a selection's sizes against `contentByPath` (e.g. after patching). */
+function sameSelection(selection, contentByPath) {
+  const size = (p) => (contentByPath.get(p) || '').length;
+  const pool = [...selection.files, ...selection.skipped];
+  const reviewedChars = Math.min(selection.mode === 'full' ? Infinity : SOURCE_BUDGET, selection.files.reduce((n, p) => n + size(p), 0));
+  return { ...selection, reviewedChars, totalChars: pool.reduce((n, p) => n + size(p), 0) };
+}
+
 /** Chooses which files Claude reads, within the character budget (riskiest first). */
 export function selectSourceForReview(contentByPath, budget = SOURCE_BUDGET) {
   const all = [...contentByPath.entries()];
@@ -131,8 +139,12 @@ export function unavailableFromResponse(status, data) {
 }
 
 
-export function buildReviewRequest({ repo, contentByPath }) {
-  const selection = selectSourceForReview(contentByPath);
+/**
+ * `selectionFrom` (optional) = the source whose file selection to reuse. A re-scan of patched code
+ * passes the original source, so Claude reads exactly the same files as the scan it is compared with.
+ */
+export function buildReviewRequest({ repo, contentByPath, selectionFrom }) {
+  const selection = sameSelection(selectSourceForReview(selectionFrom || contentByPath), contentByPath);
   const fullSource = selection.files
     .map((p) => {
       let src = numbered(contentByPath.get(p));

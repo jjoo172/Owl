@@ -533,7 +533,8 @@ function renderPatchCard(data) {
     </div>
     <div id="patch-progress" hidden></div>
     <div id="patch-results" hidden></div>
-  </section>`;
+  </section>
+  <section class="card compare-card" id="compare-card" hidden></section>`;
 }
 
 function wirePatch(data) {
@@ -635,7 +636,7 @@ function renderPatchResults(data, r) {
         ${r.files.length ? `<span class="sub">(+${fmt(r.files.reduce((n, f) => n + f.added, 0))} −${fmt(r.files.reduce((n, f) => n + f.removed, 0))} lines)</span>` : ''}
         · ${fmt(r.skipped.length)} not patched${r.unaddressed.length ? ` · ${fmt(r.unaddressed.length)} not reached` : ''}
         <span class="sub">· ${esc(modelName(r.model))}${cost}${r.cached ? ' · cached' : ''}</span></div>
-      ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button></div>` : ''}
+      ${r.patchFile ? `<div class="actions"><button type="button" id="dl-patch" class="primary">Download ${esc(fname)}</button><button type="button" id="copy-patch">Copy patch</button><button type="button" id="rescan-btn">Re-scan patched code</button></div>` : ''}
     </div>
     ${r.patchFile ? `<p class="sub">Apply from the repository root with <code>git apply --check ${esc(fname)} &amp;&amp; git apply ${esc(fname)}</code>. These fixes were written by an AI agent and checked only to apply cleanly — review, build and test them before relying on them.</p>` : ''}
     ${r.summary ? `<div class="ai-summary"><h3>Agent's notes</h3>${r.summary.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('')}</div>` : ''}
@@ -657,6 +658,7 @@ function renderPatchResults(data, r) {
     a.click();
     URL.revokeObjectURL(a.href);
   });
+  $('#rescan-btn')?.addEventListener('click', () => runRescan(data, r));
   $('#copy-patch')?.addEventListener('click', async (e) => {
     try {
       await navigator.clipboard.writeText(r.patchFile);
@@ -665,4 +667,104 @@ function renderPatchResults(data, r) {
       e.target.textContent = 'Copy failed — use Download';
     }
   });
+}
+
+// ---------- re-scan the patched code and compare ----------
+async function runRescan(data, patch) {
+  const run = ++patchRun;
+  const live = () => run === patchRun && current === data;
+  const card = $('#compare-card');
+  const btn = $('#rescan-btn');
+  btn.disabled = true;
+  card.hidden = false;
+  card.innerHTML = `<h2>Before and after patching</h2>
+    <p class="sub" style="margin-top:0">Running the original vulnerability review on the patched code, with the same model, instructions and files.</p>
+    <div class="patch-status"><span class="spinner sm" aria-hidden="true"></span><span id="rescan-status">Starting…</span></div>`;
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  try {
+    const res = await fetch('/api/rescan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: data.repo.owner, repo: data.repo.name, sha: data.repo.sha, ref: data.repo.ref, patchFile: patch.patchFile,
+        before: {
+          tier: data.tier, risk: { level: data.risk.level }, coverage: { complete: data.coverage?.complete !== false },
+          findings: data.findings.map((f) => ({ file: f.file, line: f.line, severity: f.severity, title: f.title || '', category: f.category || '', ruleId: f.ruleId || '', detail: f.detail || '', verdict: f.verdict })),
+        },
+      }),
+    });
+    if (!(res.headers.get('content-type') || '').includes('application/x-ndjson') || !res.body) throw new Error(`The re-scan service answered HTTP ${res.status}.`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let result = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      buf += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.type === 'progress' && live()) $('#rescan-status').textContent = msg.message + '…';
+        else if (msg.type === 'error') throw new Error(msg.message);
+        else if (msg.type === 'result') result = msg.data;
+      }
+      if (done) break;
+    }
+    if (!live()) return;
+    if (!result) throw new Error('The connection closed before the re-scan finished. Try again.');
+    renderComparison(data, result);
+  } catch (err) {
+    if (!live()) return;
+    card.innerHTML = `<h2>Before and after patching</h2><div class="error" role="alert" style="margin:0">${esc(err.message || String(err))}</div>`;
+  } finally {
+    if (live()) {
+      btn.disabled = false;
+      btn.textContent = 'Re-scan again';
+    }
+  }
+}
+
+function renderComparison(data, { after, comparison: c }) {
+  const card = $('#compare-card');
+  const max = Math.max(1, ...SEVERITIES.map((s) => Math.max(c.before.bySeverity[s], c.after.bySeverity[s])));
+  const delta = (n) => (n < 0 ? `<span class="down">−${fmt(-n)}</span>` : n > 0 ? `<span class="up">+${fmt(n)}</span>` : '<span class="sub">no change</span>');
+  const levelWord = c.levelChange === null ? '' : c.levelChange < 0 ? `${-c.levelChange} level${c.levelChange === -1 ? '' : 's'} lower` : c.levelChange > 0 ? `${c.levelChange} level${c.levelChange === 1 ? '' : 's'} higher` : 'unchanged';
+  const side = (label, s, tier) => `<div class="cmp-side">
+      <div class="label">${esc(label)}</div>
+      <div class="level lvl-${esc(s.level || 'Moderate')}">${esc(s.level || '—')}</div>
+      <div class="sub">${fmt(s.total)} vulnerabilit${s.total === 1 ? 'y' : 'ies'}${tier === 'full' ? '' : ' · basic scan'}</div>
+    </div>`;
+  const row = (f, extra = '') => `<li><div>${sevPill(f.severity)} <b>${esc(f.title)}</b> <span class="mono sub">${esc(f.file)}${f.line ? ':' + f.line : ''}</span>${extra}</div>${f.detail ? `<div class="sub">${esc(f.detail)}</div>` : ''}</li>`;
+  const list = (items, render) => (items.length ? `<ul class="plain cmp-list">${items.map(render).join('')}</ul>` : '<p class="sub">None.</p>');
+
+  card.innerHTML = `
+    <h2>Before and after patching</h2>
+    ${c.comparable ? '' : `<div class="tier-banner partial-banner" role="status"><b>Not a like-for-like comparison.</b> ${
+      after.tier !== 'full' ? `The re-scan fell back to a basic scan (${esc(after.tierReason || 'Claude was unavailable')}), so it can't be compared fairly with the full review.` : 'The two scans covered different amounts of the code.'
+    } Re-run the re-scan when Claude is available.</div>`}
+    <div class="cmp-hero">
+      ${side('Original code', c.before, c.before.tier)}
+      <div class="cmp-arrow" aria-hidden="true">→</div>
+      ${side('With the patches', c.after, c.after.tier)}
+      <div class="cmp-verdict"><b>${c.levelChange === null ? '' : c.levelChange < 0 ? 'Risk reduced' : c.levelChange > 0 ? 'Risk increased' : 'Risk level unchanged'}</b>
+        <div class="sub">${esc(levelWord)} · ${fmt(c.fixed.length)} fixed · ${fmt(c.remaining.length)} still present · ${fmt(c.introduced.length)} new</div></div>
+    </div>
+    <table class="cmp-table">
+      <thead><tr><th>Severity</th><th class="num">Before</th><th class="num">After</th><th class="hide-sm"></th><th class="num">Change</th></tr></thead>
+      <tbody>${SEVERITIES.map((s) => `<tr>
+        <td>${sevPill(s)}</td><td class="num">${fmt(c.before.bySeverity[s])}</td><td class="num">${fmt(c.after.bySeverity[s])}</td>
+        <td class="hide-sm cmp-bars"><span class="bar before" style="width:${(100 * c.before.bySeverity[s]) / max}%"></span><span class="bar after" style="width:${(100 * c.after.bySeverity[s]) / max}%;background:${SEV_COLOR[s]}"></span></td>
+        <td class="num">${delta(c.after.bySeverity[s] - c.before.bySeverity[s])}</td></tr>`).join('')}
+      <tr class="total"><td><b>Total</b></td><td class="num"><b>${fmt(c.before.total)}</b></td><td class="num"><b>${fmt(c.after.total)}</b></td><td class="hide-sm"></td><td class="num">${delta(c.after.total - c.before.total)}</td></tr></tbody>
+    </table>
+    <p class="sub">Both reviews used the same model, instructions and ${after.coverage?.complete === false ? 'subset of files' : 'files'}${after.patchedFiles ? `; ${fmt(after.patchedFiles.length)} file${after.patchedFiles.length === 1 ? ' was' : 's were'} patched` : ''}. AI reviews vary a little from run to run, so a small difference can be noise.</p>
+    ${after.ai?.summary ? `<div class="ai-summary"><h3>Review of the patched code</h3>${after.ai.summary.split(/\n{2,}/).map((p) => `<p>${esc(p)}</p>`).join('')}</div>` : ''}
+    ${fold('cmp-fixed', 'Fixed', `${fmt(c.fixed.length)}`, list(c.fixed, (f) => row(f)))}
+    ${fold('cmp-remaining', 'Still present', `${fmt(c.remaining.length)}`, list(c.remaining, (m) => row(m.after, m.after.severity !== m.before.severity ? ` <span class="pill">was ${esc(m.before.severity)}</span>` : '')))}
+    ${fold('cmp-new', 'New in the patched code', `${fmt(c.introduced.length)}`, `${c.introduced.length ? '<p class="sub" style="margin-top:0">Found only in the re-scan. Some may be introduced by a patch; others may be issues the first review missed.</p>' : ''}${list(c.introduced, (f) => row(f))}`)}
+    ${after.ai?.recommendations?.length ? fold('cmp-recs', 'Remaining recommendations', `${fmt(after.ai.recommendations.length)}`, `<ul class="plain">${after.ai.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`) : ''}
+    <p class="sub">${esc(after.ai ? modelName(after.ai.model) : 'Basic scan')}${typeof after.ai?.costUsd === 'number' ? ` · re-scan cost $${after.ai.costUsd < 0.01 ? after.ai.costUsd.toFixed(4) : after.ai.costUsd.toFixed(2)}` : ''}${after.cached ? ' · cached' : ''}</p>`;
 }

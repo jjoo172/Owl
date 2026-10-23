@@ -62,6 +62,19 @@ completed patches, at 40 steps, a $2 session cap, 10 minutes, or when the daily 
 
 CLI: `node src/cli.js owner/repo --patch [--out file.patch]`.
 
+### Re-scanning the patched code
+
+After patches are proposed, **Re-scan patched code** runs the original vulnerability review again
+on the code with the patches applied, using the same model, the same instructions and the same
+files as the first scan (so large repositories are compared like for like). Owl applies the patch
+exactly (refusing it if it doesn't match the commit), then shows **before and after** side by side:
+the overall risk level, vulnerability counts by severity, and which vulnerabilities were **fixed**,
+are **still present** (including ones whose severity changed), or are **new**, plus Claude's summary
+of the patched code. Findings are matched across the two reviews by file, by line (moved through the
+patch, since patching shifts lines) and by kind of bug. AI reviews vary slightly between runs, so the
+page notes that a small difference can be noise. The re-scan costs one more review and counts toward
+the daily budget; if it falls back to a basic scan, the comparison is flagged as not like for like.
+
 ## Run locally
 
 Requires Node 20+. No dependencies.
